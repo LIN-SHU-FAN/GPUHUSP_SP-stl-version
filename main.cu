@@ -23,6 +23,7 @@ public:
 };
 
 class GPU_DB {
+public:
     int **item,**tid;
     int **iu,**ru;
 
@@ -150,10 +151,45 @@ void SWUpruning(double threshold,DB &DBdata){
 
 }
 
+void Bulid_GPU_DB(DB &DBdata,GPU_DB &Gpu_Db){
+    Gpu_Db.sid_len=int(DBdata.sequence_len.size());
+    Gpu_Db.sequence_len = new int[Gpu_Db.sid_len];
+
+    Gpu_Db.item = new int*[Gpu_Db.sid_len];
+    Gpu_Db.iu = new int*[Gpu_Db.sid_len];
+    Gpu_Db.ru = new int*[Gpu_Db.sid_len];
+    Gpu_Db.tid = new int*[Gpu_Db.sid_len];
+
+    for(int i=0;i<Gpu_Db.sid_len;i++){
+        Gpu_Db.sequence_len[i] = DBdata.sequence_len[i];
+
+
+        Gpu_Db.item[i] = new int[Gpu_Db.sequence_len[i]];
+        Gpu_Db.iu[i] = new int[Gpu_Db.sequence_len[i]];
+        Gpu_Db.ru[i] = new int[Gpu_Db.sequence_len[i]];
+        Gpu_Db.tid[i] = new int[Gpu_Db.sequence_len[i]];
+        for(int j=0;j<Gpu_Db.sequence_len[i];j++){
+            Gpu_Db.item[i][j]=DBdata.item[i][j];
+            Gpu_Db.iu[i][j]=DBdata.iu[i][j];
+            Gpu_Db.ru[i][j]=DBdata.ru[i][j];
+            Gpu_Db.tid[i][j]=DBdata.tid[i][j];
+
+//            cout<<Gpu_Db.item[i][j]<<" ";
+//            cout<<Gpu_Db.iu[i][j]<<" ";
+//            cout<<Gpu_Db.ru[i][j]<<" ";
+//            cout<<Gpu_Db.tid[i][j]<<"\n";
+        }
+
+//        cout<<Gpu_Db.sequence_len[i]<<endl;
+
+    }
+//    cout<<"";
+}
+
 int main() {
 
     // 指定要讀取的檔案名稱
-    string filename = "YoochooseSamller.txt";
+    string filename = "Yoochoose.txt";
     ifstream file(filename);
     vector<string> lines;
 
@@ -168,24 +204,136 @@ int main() {
 
     file.close(); // 關閉檔案
 
-
-    double threshold = 0.03 * DBdata.DButility;
-
-
+    double threshold = 0.000024 * DBdata.DButility;
 
     auto start = std::chrono::high_resolution_clock::now();
 
     SWUpruning(threshold,DBdata);
 
+
+
+
+    GPU_DB Gpu_Db;
+
+    Bulid_GPU_DB(DBdata,Gpu_Db);
+
+    size_t freeMem = 0;
+    size_t totalMem = 0;
+
+    // 獲取 GPU 的內存信息
+    cudaError_t status = cudaMemGetInfo(&freeMem, &totalMem);
+
+    if (status == cudaSuccess) {
+        cout << "GPU 總內存: " << totalMem / (1024 * 1024) << " MB" << endl;
+        cout << "GPU 可用內存: " << freeMem / (1024 * 1024) << " MB" << endl;
+    } else {
+        cerr << "無法獲取內存信息，錯誤碼: " << cudaGetErrorString(status) << endl;
+    }
+
+
+    int **d_item_project;
+    cudaMalloc(&d_item_project, Gpu_Db.sid_len * sizeof(int*));
+
+    int **d_iu_project;
+    cudaMalloc(&d_iu_project, Gpu_Db.sid_len * sizeof(int*));
+
+    int **d_ru_project;
+    cudaMalloc(&d_ru_project, Gpu_Db.sid_len * sizeof(int*));
+
+    int **d_tid_project;
+    cudaMalloc(&d_tid_project, Gpu_Db.sid_len * sizeof(int*));
+
+    // 主機上的指標陣列，用於存放每一行的 d_tmp 指標
+    //cudaMemcpy(&d_item_project[i], &d_tmp, sizeof(int*), cudaMemcpyDeviceToDevice);不能這樣,因為d_item_project[i]在host不能讀取
+    //要開主機指標的指標（陣列）存Device指標
+    int **h_item_project = new int*[Gpu_Db.sid_len];
+    int **h_iu_project = new int*[Gpu_Db.sid_len];
+    int **h_ru_project = new int*[Gpu_Db.sid_len];
+    int **h_tid_project = new int*[Gpu_Db.sid_len];
+
+
+    for(int i=0;i<Gpu_Db.sid_len;i++){
+        int *d_tmp;
+        cudaMalloc(&d_tmp, Gpu_Db.sequence_len[i] * 1000 * sizeof(int));//開大空間分配
+        cudaMemcpy(d_tmp,Gpu_Db.item[i],Gpu_Db.sequence_len[i]*sizeof(int),cudaMemcpyHostToDevice);
+        h_item_project[i] = d_tmp;
+
+        cudaMalloc(&d_tmp, Gpu_Db.sequence_len[i] * 1000 * sizeof(int));//開大空間分配
+        cudaMemcpy(d_tmp,Gpu_Db.iu[i],Gpu_Db.sequence_len[i]*sizeof(int),cudaMemcpyHostToDevice);
+        h_iu_project[i] = d_tmp;
+
+        cudaMalloc(&d_tmp, Gpu_Db.sequence_len[i] * 1000 * sizeof(int));//開大空間分配
+        cudaMemcpy(d_tmp,Gpu_Db.ru[i],Gpu_Db.sequence_len[i]*sizeof(int),cudaMemcpyHostToDevice);
+        h_ru_project[i] = d_tmp;
+
+        cudaMalloc(&d_tmp, Gpu_Db.sequence_len[i] * 1000 * sizeof(int));//開大空間分配
+        cudaMemcpy(d_tmp,Gpu_Db.tid[i],Gpu_Db.sequence_len[i]*sizeof(int),cudaMemcpyHostToDevice);
+        h_tid_project[i] = d_tmp;
+    }
+
+    cudaMemcpy(d_item_project, h_item_project, Gpu_Db.sid_len * sizeof(int*), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_iu_project, h_iu_project, Gpu_Db.sid_len * sizeof(int*), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_ru_project, h_ru_project, Gpu_Db.sid_len * sizeof(int*), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_tid_project, h_tid_project, Gpu_Db.sid_len * sizeof(int*), cudaMemcpyHostToDevice);
+
+
+    //kernelfunction操作
+
+
+    // 獲取 GPU 的內存信息
+    status = cudaMemGetInfo(&freeMem, &totalMem);
+
+    if (status == cudaSuccess) {
+        cout << "GPU 總內存: " << totalMem / (1024 * 1024) << " MB" << endl;
+        cout << "GPU 可用內存: " << freeMem / (1024 * 1024) << " MB" << endl;
+    } else {
+        cerr << "無法獲取內存信息，錯誤碼: " << cudaGetErrorString(status) << endl;
+    }
+
+    for(int i=0;i<Gpu_Db.sid_len;i++) {
+        cudaFree(h_item_project[i]);
+        cudaFree(h_iu_project[i]);
+        cudaFree(h_ru_project[i]);
+        cudaFree(h_tid_project[i]);
+    }
+
+    delete[] h_item_project;
+    delete[] h_iu_project;
+    delete[] h_ru_project;
+    delete[] h_tid_project;
+
+    cudaFree(d_item_project);
+    cudaFree(d_iu_project);
+    cudaFree(d_ru_project);
+    cudaFree(d_tid_project);
+
+
+//    // 獲取 GPU 的內存信息
+//    status = cudaMemGetInfo(&freeMem, &totalMem);
+//
+//    if (status == cudaSuccess) {
+//        cout << "GPU 總內存: " << totalMem / (1024 * 1024) << " MB" << endl;
+//        cout << "GPU 可用內存: " << freeMem / (1024 * 1024) << " MB" << endl;
+//    } else {
+//        cerr << "無法獲取內存信息，錯誤碼: " << cudaGetErrorString(status) << endl;
+//    }
+
+
+//    for(int i=0;i<Gpu_Db.sid_len;i++) {
+//        for (int j = 0; j < Gpu_Db.sequence_len[i]; j++) {
+//            cout << Gpu_Db.item[i][j] << " ";
+//            cout << Gpu_Db.iu[i][j] << " ";
+//            cout << Gpu_Db.ru[i][j] << " ";
+//            cout << Gpu_Db.tid[i][j] << "\n";
+//        }
+//        cout << Gpu_Db.sequence_len[i] << endl;
+//    }
     auto end = std::chrono::high_resolution_clock::now();
 
 
     // 計算持續時間，並轉換為毫秒
     std::chrono::duration<double> duration = end - start;
     std::cout << "Execution time: " << duration.count() << " seconds" << std::endl;
-
-
-    GPU_DB Gpu_Db;
 
     return 0;
 }
