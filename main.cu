@@ -22,7 +22,7 @@ public:
     int DButility=0;
 
     unordered_map<int,int> item_swu;
-    vector<int> DB_item_set;
+    unordered_set<int> DB_item_set;
 };
 
 class GPU_DB {
@@ -35,13 +35,13 @@ public:
 
     int sid_len;
 
-    vector<int> DB_item_set;
+    unordered_set<int> DB_item_set;
 };
 class Tree_node{
 public:
     string pattern;
     int *ProjectArr_first_position,*ProjectArr_len;
-    
+
 };
 
 
@@ -149,6 +149,8 @@ void SWUpruning(double threshold,DB &DBdata){
                 iu.push_back(DBdata.iu[i][j]);
                 ru.push_back(DBdata.ru[i][j]);
                 seq_len++;
+                
+                update_DB.DB_item_set.insert(DBdata.item[i][j]);
             }
         }
 
@@ -273,19 +275,19 @@ int main() {
 
     Bulid_GPU_DB(DBdata,Gpu_Db);
 
-    
+
     stack<Tree_node> Main_stack;
     Tree_node top1_Node;
 
     top1_Node.pattern = "";
     top1_Node.ProjectArr_first_position=new int[Gpu_Db.sid_len];
     top1_Node.ProjectArr_len=new int[Gpu_Db.sid_len];
-    
+
     //DB clearDBdata;
     //DBdata = clearDBdata;
     //cout<<Gpu_Db.max_sequence_len;
-    
-    
+
+
     size_t freeMem = 0;
     size_t totalMem = 0;
 
@@ -393,14 +395,14 @@ int main() {
 
         //這裡之後改成依照每個sqe長度跑thread
         PEUcounter<<<blocksPerGrid,threadsPerBlock>>>(i,d_item_project,d_iu_project,d_ru_project,d_tid_project
-                                                      ,d_sequence_len,Gpu_Db.sid_len,d_PEU_seq,d_Utility_seq,d_project_point);
+                ,d_sequence_len,Gpu_Db.sid_len,d_PEU_seq,d_Utility_seq,d_project_point);
 
         int *h_PEU_seq=new int[Gpu_Db.sid_len];
         cudaMemcpy(h_PEU_seq, d_PEU_seq, Gpu_Db.sid_len*sizeof(int), cudaMemcpyDeviceToHost);
 
         int *h_Utility_seq=new int[Gpu_Db.sid_len];
         cudaMemcpy(h_Utility_seq, d_Utility_seq, Gpu_Db.sid_len*sizeof(int), cudaMemcpyDeviceToHost);
-        
+
         //這裡可以用加總
         int PEU_count=0;
         for(int j=0;j<Gpu_Db.sid_len;j++){
