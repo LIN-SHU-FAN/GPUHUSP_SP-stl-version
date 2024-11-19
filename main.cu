@@ -40,7 +40,7 @@ public:
 class Tree_node{
 public:
     string pattern;
-    int *ProjectArr_first_position,*ProjectArr_len;
+    int *ProjectArr_sid,*ProjectArr_first_position,*ProjectArr_len;
 
 };
 
@@ -122,15 +122,6 @@ void parseData(ifstream &file,DB &DBdata) {
 
 void SWUpruning(double threshold,DB &DBdata){
     DB update_DB;
-
-//    unordered_set<int> ItemSwuUnderThreshold;
-//    for(pair<int,int>i:DBdata.item_swu){
-//        if(i.second<threshold){
-//            ItemSwuUnderThreshold.insert(i.first);
-//        }else{
-//            update_DB.DB_item_set.push_back(i.first);
-//        }
-//    }
     vector<int> item,tid;
     vector<int> iu,ru;
     int seq_len;
@@ -149,7 +140,7 @@ void SWUpruning(double threshold,DB &DBdata){
                 iu.push_back(DBdata.iu[i][j]);
                 ru.push_back(DBdata.ru[i][j]);
                 seq_len++;
-                
+
                 update_DB.DB_item_set.insert(DBdata.item[i][j]);
             }
         }
@@ -170,9 +161,7 @@ void SWUpruning(double threshold,DB &DBdata){
         }
 
     }
-    //cout<<"";
     DBdata = update_DB;
-
 }
 
 void Bulid_GPU_DB(DB &DBdata,GPU_DB &Gpu_Db){
@@ -216,38 +205,55 @@ void Bulid_GPU_DB(DB &DBdata,GPU_DB &Gpu_Db){
     Gpu_Db.max_sequence_len=max_sequence_len;
 
     Gpu_Db.DB_item_set=DBdata.DB_item_set;
-    //cout<<max_sequence_len;
 }
 
 __global__ void PEUcounter(int project_item,
                            int** d_item_project, int** d_iu_project, int** d_ru_project, int** d_tid_project,
                            int* d_sequence_len,int sid_len,
-                           int *d_PEU_seq,int *d_Utility_seq,int *d_project_point) {
+                           int *d_PEU_seq,int *d_Utility_seq) {
 
     if(threadIdx.x<d_sequence_len[blockIdx.x]){
         if(d_item_project[blockIdx.x][threadIdx.x]==project_item){
             atomicMax(&d_PEU_seq[blockIdx.x], d_iu_project[blockIdx.x][threadIdx.x]+d_ru_project[blockIdx.x][threadIdx.x]);
-            atomicMin(&d_project_point[blockIdx.x],int(blockIdx.x));
             atomicMax(&d_Utility_seq[blockIdx.x], d_iu_project[blockIdx.x][threadIdx.x]);
         }
     }
 }
 
-__global__ void PeuCounter(int project_item,
-                           int** d_item_project, int** d_iu_project, int** d_ru_project, int** d_tid_project,
-                           int* d_sequence_len,int sid_len,
-                           int *d_PEU_seq,int *d_project_point) {
+//__global__ void PeuCounter(int project_item,int sid,
+//                           int** d_item_project, int** d_iu_project, int** d_ru_project, int** d_tid_project,
+//                           int* d_sequence_len,int sid_len,
+//                           int *d_PEU_seq,int *d_Utility_seq,int *d_project_point) {
+//    if(threadIdx.x<d_sequence_len[sid]){
+//        if(d_item_project[sid][threadIdx.x]==project_item){
+//            atomicMax(&d_PEU_seq[sid], d_iu_project[sid][threadIdx.x]+d_ru_project[sid][threadIdx.x]);
+//
+//        }
+//    }
+//}
 
-    if(threadIdx.x<d_sequence_len[blockIdx.x]){
-        if(d_item_project[blockIdx.x][threadIdx.x]==project_item){
-            atomicMax(&d_PEU_seq[blockIdx.x], d_iu_project[blockIdx.x][threadIdx.x]+d_ru_project[blockIdx.x][threadIdx.x]);
-            atomicMin(&d_project_point[blockIdx.x],int(blockIdx.x));
+__global__ void Array_add_reduction(int Array_len,int *inputArr,int *outputArr){
+    __shared__ int shared_data[1024];
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    shared_data[tid] = (idx < Array_len) ? inputArr[idx] : 0;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            shared_data[tid] += shared_data[tid + stride];
         }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        outputArr[blockIdx.x] = shared_data[0];
     }
 }
 
 int main() {
-    auto start = std::chrono::high_resolution_clock::now();
+
 
     // 指定要讀取的檔案名稱
     string filename = "Yoochoose.txt";
@@ -267,9 +273,11 @@ int main() {
 //    cout<<test_max_seq;
     file.close(); // 關閉檔案
 
-    double threshold = 0.00014 * DBdata.DButility;
+    double threshold = 0.00034 * DBdata.DButility;
 
     SWUpruning(threshold,DBdata);
+
+
 
     GPU_DB Gpu_Db;
 
@@ -280,9 +288,9 @@ int main() {
     Tree_node top1_Node;
 
     top1_Node.pattern = "";
-    top1_Node.ProjectArr_first_position=new int[Gpu_Db.sid_len];
+    top1_Node.ProjectArr_first_position=new int[Gpu_Db.sid_len]();
     top1_Node.ProjectArr_len=new int[Gpu_Db.sid_len];
-
+    top1_Node.ProjectArr_len=Gpu_Db.sequence_len;
     //DB clearDBdata;
     //DBdata = clearDBdata;
     //cout<<Gpu_Db.max_sequence_len;
@@ -376,52 +384,77 @@ int main() {
     cudaMalloc(&d_PEU_seq, Gpu_Db.sid_len * sizeof(int));
     cudaMemset(d_PEU_seq, 0, Gpu_Db.sid_len * sizeof(int));
 
+    int d_PEU_add_len = (Gpu_Db.sid_len + 1024 - 1) / 1024;
+    int *d_PEU_add_result;
+    cudaMalloc(&d_PEU_add_result, d_PEU_add_len * sizeof(int));
+
     int *d_Utility_seq;
     cudaMalloc(&d_Utility_seq, Gpu_Db.sid_len * sizeof(int));
     cudaMemset(d_Utility_seq, 0, Gpu_Db.sid_len * sizeof(int));
 
-    int *d_project_point;
-    cudaMalloc(&d_project_point, Gpu_Db.sid_len * sizeof(int));
+
 
     int threadsPerBlock;
     int blocksPerGrid;
+
+    auto start = std::chrono::high_resolution_clock::now();
 
     for(int i:Gpu_Db.DB_item_set){
         threadsPerBlock=Gpu_Db.max_sequence_len;
         blocksPerGrid=Gpu_Db.sid_len;
 //        for(int j=0;j<Gpu_Db.sid_len;j++){
-//
+//            PeuCounter<<<1,Gpu_Db.sequence_len[j]>>>(i,j,d_item_project,d_iu_project,d_ru_project,d_tid_project
+//                    ,d_sequence_len,Gpu_Db.sid_len,d_PEU_seq,d_Utility_seq,d_project_point);
 //        }
 
-        //這裡之後改成依照每個sqe長度跑thread
+        //一次開好比較快
         PEUcounter<<<blocksPerGrid,threadsPerBlock>>>(i,d_item_project,d_iu_project,d_ru_project,d_tid_project
-                ,d_sequence_len,Gpu_Db.sid_len,d_PEU_seq,d_Utility_seq,d_project_point);
+                ,d_sequence_len,Gpu_Db.sid_len,d_PEU_seq,d_Utility_seq);
 
-        int *h_PEU_seq=new int[Gpu_Db.sid_len];
-        cudaMemcpy(h_PEU_seq, d_PEU_seq, Gpu_Db.sid_len*sizeof(int), cudaMemcpyDeviceToHost);
+//        int *h_PEU_seq=new int[Gpu_Db.sid_len];
+//        cudaMemcpy(h_PEU_seq, d_PEU_seq, Gpu_Db.sid_len*sizeof(int), cudaMemcpyDeviceToHost);
+//
+//        //這裡可以用加總
+//        int PEU_count=0;
+//        for(int j=0;j<Gpu_Db.sid_len;j++){
+//            PEU_count+=h_PEU_seq[j];
+//        }
+//        cout<<"item:"<<i<<endl;
+//        cout<<"PEU:"<<PEU_count<<endl<<endl;
+        //
+//        int *h_Utility_seq=new int[Gpu_Db.sid_len];
+//        cudaMemcpy(h_Utility_seq, d_Utility_seq, Gpu_Db.sid_len*sizeof(int), cudaMemcpyDeviceToHost);
 
-        int *h_Utility_seq=new int[Gpu_Db.sid_len];
-        cudaMemcpy(h_Utility_seq, d_Utility_seq, Gpu_Db.sid_len*sizeof(int), cudaMemcpyDeviceToHost);
 
-        //這裡可以用加總
-        int PEU_count=0;
-        for(int j=0;j<Gpu_Db.sid_len;j++){
-            PEU_count+=h_PEU_seq[j];
-            if(PEU_count>=threshold){
-                break;
-            }
-            //cout<<h_PEU_seq[j]<<endl;
+        Array_add_reduction<<<d_PEU_add_len,1024>>>(Gpu_Db.sid_len,d_PEU_seq,d_PEU_add_result);
+        int *h_PEU_add_result=new int[d_PEU_add_len];
+        cudaMemcpy(h_PEU_add_result, d_PEU_add_result, d_PEU_add_len*sizeof(int), cudaMemcpyDeviceToHost);
+
+        int PEU_count = 0;
+        for (int j = 0; j < d_PEU_add_len; j++) {
+            PEU_count += h_PEU_add_result[j];
         }
+        cout<<"item:"<<i<<endl;
+        cout<<"PEU:"<<PEU_count<<endl;
 
-        if(PEU_count<threshold){
-            continue;
-        }
 
-        //cout<<i<<endl;
+
+
+
+//        if(PEU_count<threshold){
+//            continue;
+//        }
 
         cudaMemset(d_PEU_seq, 0, Gpu_Db.sid_len * sizeof(int));
         //cout<<"*/*****\n";
     }
+
+    auto end = std::chrono::high_resolution_clock::now();
+
+
+    // 計算持續時間，並轉換為毫秒
+    std::chrono::duration<double> duration = end - start;
+    std::cout << "Execution time: " << duration.count() << " seconds" << std::endl;
 
 //    PEUcounter<<<blocksPerGrid,threadsPerBlock>>>(821024,d_item_project,d_iu_project,d_ru_project,d_tid_project,d_sequence_len,Gpu_Db.sid_len,d_PEU_seq);
 //
@@ -484,12 +517,9 @@ int main() {
 //        }
 //        cout << Gpu_Db.sequence_len[i] << endl;
 //    }
-    auto end = std::chrono::high_resolution_clock::now();
 
 
-    // 計算持續時間，並轉換為毫秒
-    std::chrono::duration<double> duration = end - start;
-    std::cout << "Execution time: " << duration.count() << " seconds" << std::endl;
+
 
     return 0;
 }
