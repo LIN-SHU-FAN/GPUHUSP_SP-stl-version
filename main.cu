@@ -320,13 +320,14 @@ __global__ void Array_add_reduction(int Array_len,int *inputArr,int *outputArr){
 
 __global__ void test(int ***d_single_item_chain,int d_c_item_len,int *d_c_sid_len,int **d_c_seq_len,int **d_chain_sid){
     for(int i=0;i<d_c_item_len;i++){
+        printf("item:%d\n",i);
         for(int j=0;j<d_c_sid_len[i];j++){
+            printf("sid:%d\n",d_chain_sid[i][j]);
             for(int k=0;k<d_c_seq_len[i][j];k++){
                 printf("%d ",d_single_item_chain[i][j][k]);
             }
             printf("\n");
         }
-        printf("\n");
     }
 }
 
