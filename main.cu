@@ -332,6 +332,8 @@ __global__ void test(int ***d_single_item_chain,int d_c_item_len,int *d_c_sid_le
 }
 
 void GPUHUSP(const GPU_DB &Gpu_Db){
+
+
     size_t freeMem = 0;
     size_t totalMem = 0;
 
@@ -453,6 +455,20 @@ void GPUHUSP(const GPU_DB &Gpu_Db){
     cudaMemcpy(d_c_seq_len,h_tmp_c_seq_len,Gpu_Db.c_item_len*sizeof(int*),cudaMemcpyHostToDevice);
 
     cudaMemcpy(d_chain_sid,h_tmp_chain_sid,Gpu_Db.c_item_len*sizeof(int*),cudaMemcpyHostToDevice);
+
+
+
+    int *d_PEU_Arr;//長度是seq數量 用來算peu(可重用)
+    cudaMalloc(&d_PEU_Arr,Gpu_Db.sid_len*sizeof(int));
+    cudaMemset(d_PEU_Arr, 0, Gpu_Db.sid_len * sizeof(int));
+
+    int *d_I_list_RSU_Arr,*d_S_list_RSU_Arr;//長度是item數量 用來算rsu(可重用)
+    cudaMalloc(&d_I_list_RSU_Arr,Gpu_Db.c_item_len*sizeof(int));
+    cudaMalloc(&d_S_list_RSU_Arr,Gpu_Db.c_item_len*sizeof(int));
+    cudaMemset(d_I_list_RSU_Arr, 0, Gpu_Db.c_item_len * sizeof(int));
+    cudaMemset(d_S_list_RSU_Arr, 0, Gpu_Db.c_item_len * sizeof(int));
+
+
 
 
     test<<<1,1>>>(d_single_item_chain,Gpu_Db.c_item_len,d_c_sid_len,d_c_seq_len,d_chain_sid);
@@ -692,6 +708,9 @@ int main() {
     auto start = std::chrono::high_resolution_clock::now();
     Bulid_GPU_DB(DBdata,Gpu_Db);
     auto end = std::chrono::high_resolution_clock::now();
+    // 計算持續時間，並轉換為毫秒
+    std::chrono::duration<double> duration = end - start;
+    std::cout << "Execution time: " << duration.count() << " seconds" << std::endl;
 
 //    for(int i=0;i<Gpu_Db.c_item_len;i++){
 //        for(int j=0;j<Gpu_Db.c_sid_len[i];j++){
@@ -702,9 +721,7 @@ int main() {
 //        }
 //    }
 
-    // 計算持續時間，並轉換為毫秒
-    std::chrono::duration<double> duration = end - start;
-    std::cout << "Execution time: " << duration.count() << " seconds" << std::endl;
+
 
     GPUHUSP(Gpu_Db);
 
