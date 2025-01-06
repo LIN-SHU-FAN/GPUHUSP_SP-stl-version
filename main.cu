@@ -41,13 +41,14 @@ public:
 
 
     int ***single_item_chain;//item->sid->instance (item已經做hash所以從0開始對應index)
-    int **chain_sid;//長度是c_item_len 寬度是c_sid_len
+    int **chain_sid;//長度是c_item_len 寬度是c_sid_len（紀錄single item 存在在哪些sid）
 
     int c_item_len;
     int *c_sid_len;//長度是c_item_len
     int **c_seq_len;//長度是c_item_len 寬度是c_sid_len
 
 };
+
 class Tree_node{
 public:
     string pattern;
@@ -331,331 +332,468 @@ __global__ void test(int ***d_single_item_chain,int d_c_item_len,int *d_c_sid_le
     }
 }
 
-void GPUHUSP(const GPU_DB &Gpu_Db){
-
-
-    size_t freeMem = 0;
-    size_t totalMem = 0;
-
-    // 獲取 GPU 的內存信息
-    cudaError_t status = cudaMemGetInfo(&freeMem, &totalMem);
-
-    if (status == cudaSuccess) {
-        cout << "GPU 總內存: " << totalMem / (1024 * 1024) << " MB" << endl;
-        cout << "GPU 可用內存: " << freeMem / (1024 * 1024) << " MB" << endl;
-    } else {
-        cerr << "無法獲取內存信息，錯誤碼: " << cudaGetErrorString(status) << endl;
-    }
-
-    //project DB初始
-    int **d_item_project;
-    cudaMalloc(&d_item_project, Gpu_Db.sid_len * sizeof(int*));
-
-    int **d_iu_project;
-    cudaMalloc(&d_iu_project, Gpu_Db.sid_len * sizeof(int*));
-
-    int **d_ru_project;
-    cudaMalloc(&d_ru_project, Gpu_Db.sid_len * sizeof(int*));
-
-    int **d_tid_project;
-    cudaMalloc(&d_tid_project, Gpu_Db.sid_len * sizeof(int*));
-
-    // 主機上的指標陣列，用於存放每一行的 d_tmp 指標
-    //cudaMemcpy(&d_item_project[i], &d_tmp, sizeof(int*), cudaMemcpyDeviceToDevice);不能這樣,因為d_item_project[i]在host不能讀取
-    //要開主機指標的指標（陣列）存Device指標
-    int **h_item_project = new int*[Gpu_Db.sid_len];
-    int **h_iu_project = new int*[Gpu_Db.sid_len];
-    int **h_ru_project = new int*[Gpu_Db.sid_len];
-    int **h_tid_project = new int*[Gpu_Db.sid_len];
-
-
-    for(int i=0;i<Gpu_Db.sid_len;i++){
-        int *d_tmp;
-        cudaMalloc(&d_tmp, Gpu_Db.sequence_len[i] * sizeof(int));
-        cudaMemcpy(d_tmp,Gpu_Db.item[i],Gpu_Db.sequence_len[i]*sizeof(int),cudaMemcpyHostToDevice);
-        h_item_project[i] = d_tmp;
-
-        cudaMalloc(&d_tmp, Gpu_Db.sequence_len[i] * sizeof(int));
-        cudaMemcpy(d_tmp,Gpu_Db.iu[i],Gpu_Db.sequence_len[i]*sizeof(int),cudaMemcpyHostToDevice);
-        h_iu_project[i] = d_tmp;
-
-        cudaMalloc(&d_tmp, Gpu_Db.sequence_len[i] * sizeof(int));
-        cudaMemcpy(d_tmp,Gpu_Db.ru[i],Gpu_Db.sequence_len[i]*sizeof(int),cudaMemcpyHostToDevice);
-        h_ru_project[i] = d_tmp;
-
-        cudaMalloc(&d_tmp, Gpu_Db.sequence_len[i] * sizeof(int));
-        cudaMemcpy(d_tmp,Gpu_Db.tid[i],Gpu_Db.sequence_len[i]*sizeof(int),cudaMemcpyHostToDevice);
-        h_tid_project[i] = d_tmp;
-    }
-
-    cudaMemcpy(d_item_project, h_item_project, Gpu_Db.sid_len * sizeof(int*), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_iu_project, h_iu_project, Gpu_Db.sid_len * sizeof(int*), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_ru_project, h_ru_project, Gpu_Db.sid_len * sizeof(int*), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_tid_project, h_tid_project, Gpu_Db.sid_len * sizeof(int*), cudaMemcpyHostToDevice);
-
-
-    int *d_sequence_len;
-    cudaMalloc(&d_sequence_len, Gpu_Db.sid_len * sizeof(int));
-    cudaMemcpy(d_sequence_len,Gpu_Db.sequence_len,Gpu_Db.sid_len * sizeof(int),cudaMemcpyHostToDevice);
-
-
-    //single item chain 初始
-    int ***d_single_item_chain;
-    cudaMalloc((void ***)&d_single_item_chain, Gpu_Db.c_item_len * sizeof(int **));
-
-    int ***h_three_dimension_single_item_chain = new int**[Gpu_Db.c_item_len];//用來存device指標的三維指標
-    int **h_two_dimension_single_item_chain;
-
-    int ***h_delete_tmp = new int**[Gpu_Db.c_item_len];//用來cudafree用的
-
-    for(int i=0;i<Gpu_Db.c_item_len;i++){
-        h_two_dimension_single_item_chain = new int*[Gpu_Db.c_sid_len[i]];//用來存device指標的二維指標
-        for(int j=0;j<Gpu_Db.c_sid_len[i];j++){
-            int *d_one_dimension_tmp;
-            cudaMalloc(&d_one_dimension_tmp,Gpu_Db.c_seq_len[i][j]*sizeof(int));
-            cudaMemcpy(d_one_dimension_tmp,Gpu_Db.single_item_chain[i][j],Gpu_Db.c_seq_len[i][j]*sizeof(int),cudaMemcpyHostToDevice);
-            h_two_dimension_single_item_chain[j] = d_one_dimension_tmp;
+__global__ void test1(int *d_item,int *d_tid,int *d_iu,int *d_ru,int *d_offsets,int *d_sequence_len,int d_sid_len){
+    for(int i = 0;i<d_sid_len;i++){
+        for(int j=d_offsets[i];j<d_offsets[i]+d_sequence_len[i];j++){
+            printf("i[%d]j[%d] = %d ",i,j-d_offsets[i],d_item[j]);
         }
 
-        int **d_two_dimension_tmp;
-        cudaMalloc(&d_two_dimension_tmp,Gpu_Db.c_sid_len[i]*sizeof(int*));
-        cudaMemcpy(d_two_dimension_tmp,h_two_dimension_single_item_chain,Gpu_Db.c_sid_len[i]*sizeof(int*),cudaMemcpyHostToDevice);
-
-        h_three_dimension_single_item_chain[i] = d_two_dimension_tmp;
-        h_delete_tmp[i]=h_two_dimension_single_item_chain;
-
-        //delete[] h_two_dimension_single_item_chain;
+        printf("sequence_len:%d\n",d_sequence_len[i]);
     }
-    cudaMemcpy(d_single_item_chain,h_three_dimension_single_item_chain,Gpu_Db.c_item_len*sizeof(int**),cudaMemcpyHostToDevice);
-    //delete[] h_three_dimension_single_item_chain;
+    printf("%d\n",d_sid_len);
+}
 
-    int *d_c_sid_len;
-    cudaMalloc(&d_c_sid_len,Gpu_Db.c_item_len*sizeof(int));
-    cudaMemcpy(d_c_sid_len,Gpu_Db.c_sid_len,Gpu_Db.c_item_len*sizeof(int),cudaMemcpyHostToDevice);
 
-    int **d_c_seq_len;
-    cudaMalloc(&d_c_seq_len,Gpu_Db.c_item_len*sizeof(int*));
-    int **h_tmp_c_seq_len = new int*[Gpu_Db.c_item_len];
+void GPUHUSP(const GPU_DB &Gpu_Db){
+    vector<int> flat_item, flat_tid, flat_iu, flat_ru;
+    vector<int> db_offsets;
+    int offset = 0;
+    //project DB初始
+    for (int i = 0; i < Gpu_Db.sid_len; i++) {
+        db_offsets.push_back(offset);
+        for (int j = 0; j < Gpu_Db.sequence_len[i]; j++) {
+            flat_item.push_back(Gpu_Db.item[i][j]);
+            flat_tid.push_back(Gpu_Db.tid[i][j]);
+            flat_iu.push_back(Gpu_Db.iu[i][j]);
+            flat_ru.push_back(Gpu_Db.ru[i][j]);
+        }
+        offset += Gpu_Db.sequence_len[i];
+    }
 
-    int **d_chain_sid;
-    cudaMalloc(&d_chain_sid,Gpu_Db.c_item_len*sizeof(int*));
-    int **h_tmp_chain_sid = new int*[Gpu_Db.c_item_len];
+    int* d_item, *d_tid, *d_iu, *d_ru;
+    int* d_db_offsets, *d_sequence_len;//offsets裡面存陣列偏移量 從0開始
+
+    cudaMalloc(&d_item, flat_item.size() * sizeof(int));
+    cudaMalloc(&d_tid, flat_tid.size() * sizeof(int));
+    cudaMalloc(&d_iu, flat_iu.size() * sizeof(int));
+    cudaMalloc(&d_ru, flat_ru.size() * sizeof(int));
+    cudaMalloc(&d_db_offsets, db_offsets.size() * sizeof(int));
+    cudaMalloc(&d_sequence_len, Gpu_Db.sid_len * sizeof(int));
+
+    cudaMemcpy(d_item, flat_item.data(), flat_item.size() * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_tid, flat_tid.data(), flat_tid.size() * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_iu, flat_iu.data(), flat_iu.size() * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_ru, flat_ru.data(), flat_ru.size() * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_db_offsets, db_offsets.data(), db_offsets.size() * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_sequence_len, Gpu_Db.sequence_len, Gpu_Db.sid_len * sizeof(int), cudaMemcpyHostToDevice);
+
+//    test1<<<1,1>>>(d_item,d_tid,d_iu,d_ru,d_db_offsets,d_sequence_len,Gpu_Db.sid_len);
+//    cudaDeviceSynchronize();
+//    cout<<"\n";
+
+    /*
+     * 假設 single_item_chain 為以下結構：
+        Item 0:
+          SID 0: [1, 2, 3]
+          SID 1: [4, 5]
+
+        Item 1:
+          SID 0: [6]
+          SID 1: [7, 8, 9, 10]
+          SID 2: [11, 12]
+
+        Item 2:
+          SID 0: [13, 14, 15, 16, 17]
+
+
+        offsets_level1=[0, 2, 5, 6]
+        對於 Item 0，二維陣列在 flat_chain 的偏移量為 0。
+        對於 Item 1，二維陣列在 flat_chain 的偏移量為 2（Item 0 有 2 個 sid）。
+        對於 Item 2，二維陣列在 flat_chain 的偏移量為 5（Item 0 和 Item 1 共計 5 個 sid）。
+
+        offsets_level2=[0, 3, 5, 6, 10, 12, 13]
+        對於 Item 0, SID 0，偏移量為 0。
+        對於 Item 0, SID 1，偏移量為 3。
+        對於 Item 1, SID 0，偏移量為 5。
+        ...
+
+
+        offsets_level1：記錄每個 item 在 offsets_level2 中的 "起始" 索引。
+        offsets_level2：記錄每個 sid 在 flat_single_item_chain 中的 "起始" 索引。
+
+        single_item_chain[item][sid][instance]
+        等於
+        index = offsets_level2[offsets_level1[item] + sid] + instance
+
+    */
+    //single item chain 初始
+    vector<int> flat_single_item_chain;
+    vector<int> chain_offsets_level1(Gpu_Db.c_item_len + 1, 0);// 長度為 c_item_len + 1，最後一個值是總 sid 數量
+    vector<int> chain_offsets_level2;
+
+    vector<int> flat_chain_sid;
+    vector<int> chain_sid_offsets;
+    int chain_sid_offset=0;
+
+    vector<int> flat_c_seq_len;
+    vector<int> c_seq_len_offsets;
+    int c_seq_len_offset=0;
 
     for(int i=0;i<Gpu_Db.c_item_len;i++){
-        int *d_tmp;
-        cudaMalloc(&d_tmp,Gpu_Db.c_sid_len[i]*sizeof(int));
-        cudaMemcpy(d_tmp,Gpu_Db.c_seq_len[i],Gpu_Db.c_sid_len[i]*sizeof(int),cudaMemcpyHostToDevice);
-        h_tmp_c_seq_len[i] = d_tmp;
+        chain_sid_offsets.push_back(chain_sid_offset);
 
-        cudaMalloc(&d_tmp,Gpu_Db.c_sid_len[i]*sizeof(int));
-        cudaMemcpy(d_tmp,Gpu_Db.chain_sid[i],Gpu_Db.c_sid_len[i]*sizeof(int),cudaMemcpyHostToDevice);
-        h_tmp_chain_sid[i] = d_tmp;
+        c_seq_len_offsets.push_back(c_seq_len_offset);
+        for(int j=0;j<Gpu_Db.c_sid_len[i];j++){
+            // 將偏移量存入 chain_offsets_level2
+            chain_offsets_level2.push_back(int(flat_single_item_chain.size()));
+
+            for(int k=0;k<Gpu_Db.c_seq_len[i][j];k++){
+                flat_single_item_chain.push_back(Gpu_Db.single_item_chain[i][j][k]);
+            }
+
+            flat_chain_sid.push_back(Gpu_Db.chain_sid[i][j]);
+
+            flat_c_seq_len.push_back(Gpu_Db.c_seq_len[i][j]);
+        }
+
+        // 計算 offsets_level1_chain
+        chain_offsets_level1[i + 1] = int(chain_offsets_level2.size());
+
+        chain_sid_offset+=Gpu_Db.c_sid_len[i];
+
+        c_seq_len_offset+=Gpu_Db.c_sid_len[i];
     }
 
-    cudaMemcpy(d_c_seq_len,h_tmp_c_seq_len,Gpu_Db.c_item_len*sizeof(int*),cudaMemcpyHostToDevice);
+    int *d_flat_single_item_chain,*d_chain_offsets_level1,*d_chain_offsets_level2;
 
-    cudaMemcpy(d_chain_sid,h_tmp_chain_sid,Gpu_Db.c_item_len*sizeof(int*),cudaMemcpyHostToDevice);
+    cudaMalloc(&d_flat_single_item_chain, flat_single_item_chain.size() * sizeof(int));
+    cudaMalloc(&d_chain_offsets_level1, chain_offsets_level1.size() * sizeof(int));
+    cudaMalloc(&d_chain_offsets_level2, chain_offsets_level2.size() * sizeof(int));
+
+    cudaMemcpy(d_flat_single_item_chain, flat_single_item_chain.data(), flat_single_item_chain.size() * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_chain_offsets_level1, chain_offsets_level1.data(), chain_offsets_level1.size() * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_chain_offsets_level2, chain_offsets_level2.data(), chain_offsets_level2.size() * sizeof(int), cudaMemcpyHostToDevice);
+
+    int *d_flat_chain_sid,*d_chain_sid_offsets;
+    cudaMalloc(&d_flat_chain_sid, flat_chain_sid.size() * sizeof(int));
+    cudaMalloc(&d_chain_sid_offsets, chain_sid_offsets.size() * sizeof(int));
+
+    cudaMemcpy(d_flat_chain_sid, flat_chain_sid.data(), flat_chain_sid.size() * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_chain_sid_offsets, chain_sid_offsets.data(), chain_sid_offsets.size() * sizeof(int), cudaMemcpyHostToDevice);
+
+    int *d_flat_c_seq_len,*d_c_seq_len_offsets;
+    cudaMalloc(&d_flat_c_seq_len, flat_c_seq_len.size() * sizeof(int));
+    cudaMalloc(&d_c_seq_len_offsets, c_seq_len_offsets.size() * sizeof(int));
+
+    cudaMemcpy(d_flat_c_seq_len, flat_c_seq_len.data(), flat_c_seq_len.size() * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_c_seq_len_offsets, c_seq_len_offsets.data(), c_seq_len_offsets.size() * sizeof(int), cudaMemcpyHostToDevice);
 
 
+    cout<<"";
 
-    int *d_PEU_Arr;//長度是seq數量 用來算peu(可重用)
-    cudaMalloc(&d_PEU_Arr,Gpu_Db.sid_len*sizeof(int));
-    cudaMemset(d_PEU_Arr, 0, Gpu_Db.sid_len * sizeof(int));
-
-    int *d_I_list_RSU_Arr,*d_S_list_RSU_Arr;//長度是item數量 用來算rsu(可重用)
-    cudaMalloc(&d_I_list_RSU_Arr,Gpu_Db.c_item_len*sizeof(int));
-    cudaMalloc(&d_S_list_RSU_Arr,Gpu_Db.c_item_len*sizeof(int));
-    cudaMemset(d_I_list_RSU_Arr, 0, Gpu_Db.c_item_len * sizeof(int));
-    cudaMemset(d_S_list_RSU_Arr, 0, Gpu_Db.c_item_len * sizeof(int));
-
-
-
-
-    test<<<1,1>>>(d_single_item_chain,Gpu_Db.c_item_len,d_c_sid_len,d_c_seq_len,d_chain_sid);
-
-//    for(int i=0;i<Gpu_Db.sid_len;i++){
-//        for(int j=0;j<Gpu_Db.sequence_len[i];j++){
-//            cout<<Gpu_Db.item[i][j]<<" ";
-//        }
-//        //cout<<Gpu_Db.sequence_len[i]<<endl;
-//        cout<<endl;
+//    size_t freeMem = 0;
+//    size_t totalMem = 0;
+//
+//    // 獲取 GPU 的內存信息
+//    cudaError_t status = cudaMemGetInfo(&freeMem, &totalMem);
+//
+//    if (status == cudaSuccess) {
+//        cout << "GPU 總內存: " << totalMem / (1024 * 1024) << " MB" << endl;
+//        cout << "GPU 可用內存: " << freeMem / (1024 * 1024) << " MB" << endl;
+//    } else {
+//        cerr << "無法獲取內存信息，錯誤碼: " << cudaGetErrorString(status) << endl;
 //    }
-
-    stack<Tree_node> Main_stack;
-    Tree_node top1_Node;
-
-    top1_Node.pattern = "";
-    top1_Node.ProjectArr_first_position=new int[Gpu_Db.sid_len];
-    top1_Node.ProjectArr_len=new int[Gpu_Db.sid_len];
-
-    //DB clearDBdata;
-    //DBdata = clearDBdata;
-    //cout<<Gpu_Db.max_sequence_len;
-
-
-
-
-
-
-
-
-
-
+//
+//    //project DB初始
+//    int **d_item_project;
+//    cudaMalloc(&d_item_project, Gpu_Db.sid_len * sizeof(int*));
+//
+//    int **d_iu_project;
+//    cudaMalloc(&d_iu_project, Gpu_Db.sid_len * sizeof(int*));
+//
+//    int **d_ru_project;
+//    cudaMalloc(&d_ru_project, Gpu_Db.sid_len * sizeof(int*));
+//
+//    int **d_tid_project;
+//    cudaMalloc(&d_tid_project, Gpu_Db.sid_len * sizeof(int*));
+//
+//    // 主機上的指標陣列，用於存放每一行的 d_tmp 指標
+//    //cudaMemcpy(&d_item_project[i], &d_tmp, sizeof(int*), cudaMemcpyDeviceToDevice);不能這樣,因為d_item_project[i]在host不能讀取
+//    //要開主機指標的指標（陣列）存Device指標
+//    int **h_item_project = new int*[Gpu_Db.sid_len];
+//    int **h_iu_project = new int*[Gpu_Db.sid_len];
+//    int **h_ru_project = new int*[Gpu_Db.sid_len];
+//    int **h_tid_project = new int*[Gpu_Db.sid_len];
+//
+//
 //    for(int i=0;i<Gpu_Db.sid_len;i++){
-//        cout<<Gpu_Db.sequence_len[i]<<endl;
+//        int *d_tmp;
+//        cudaMalloc(&d_tmp, Gpu_Db.sequence_len[i] * sizeof(int));
+//        cudaMemcpy(d_tmp,Gpu_Db.item[i],Gpu_Db.sequence_len[i]*sizeof(int),cudaMemcpyHostToDevice);
+//        h_item_project[i] = d_tmp;
+//
+//        cudaMalloc(&d_tmp, Gpu_Db.sequence_len[i] * sizeof(int));
+//        cudaMemcpy(d_tmp,Gpu_Db.iu[i],Gpu_Db.sequence_len[i]*sizeof(int),cudaMemcpyHostToDevice);
+//        h_iu_project[i] = d_tmp;
+//
+//        cudaMalloc(&d_tmp, Gpu_Db.sequence_len[i] * sizeof(int));
+//        cudaMemcpy(d_tmp,Gpu_Db.ru[i],Gpu_Db.sequence_len[i]*sizeof(int),cudaMemcpyHostToDevice);
+//        h_ru_project[i] = d_tmp;
+//
+//        cudaMalloc(&d_tmp, Gpu_Db.sequence_len[i] * sizeof(int));
+//        cudaMemcpy(d_tmp,Gpu_Db.tid[i],Gpu_Db.sequence_len[i]*sizeof(int),cudaMemcpyHostToDevice);
+//        h_tid_project[i] = d_tmp;
 //    }
-//    cout<<endl;
-    //kernelfunction操作
-
-    //如果sequence長度有超過1024需要額外處理
-    //int *block_per_sequence = new int[Gpu_Db.sid_len];
-//    if(Gpu_Db.max_sequence_len>1024){
-//        threadsPerBlock=1024;
-//        for(int i=0;i<Gpu_Db.sid_len;i++){
-//            blocksPerGrid+= (Gpu_Db.sequence_len[i]+threadsPerBlock-1)/threadsPerBlock;
-//            block_per_sequence[i] = (Gpu_Db.sequence_len[i]+threadsPerBlock-1)/threadsPerBlock;
+//
+//    cudaMemcpy(d_item_project, h_item_project, Gpu_Db.sid_len * sizeof(int*), cudaMemcpyHostToDevice);
+//    cudaMemcpy(d_iu_project, h_iu_project, Gpu_Db.sid_len * sizeof(int*), cudaMemcpyHostToDevice);
+//    cudaMemcpy(d_ru_project, h_ru_project, Gpu_Db.sid_len * sizeof(int*), cudaMemcpyHostToDevice);
+//    cudaMemcpy(d_tid_project, h_tid_project, Gpu_Db.sid_len * sizeof(int*), cudaMemcpyHostToDevice);
+//
+//
+//    int *d_sequence_len;
+//    cudaMalloc(&d_sequence_len, Gpu_Db.sid_len * sizeof(int));
+//    cudaMemcpy(d_sequence_len,Gpu_Db.sequence_len,Gpu_Db.sid_len * sizeof(int),cudaMemcpyHostToDevice);
+//
+//
+//    //single item chain 初始
+//    int ***d_single_item_chain;
+//    cudaMalloc((void ***)&d_single_item_chain, Gpu_Db.c_item_len * sizeof(int **));
+//
+//    int ***h_three_dimension_single_item_chain = new int**[Gpu_Db.c_item_len];//用來存device指標的三維指標
+//    int **h_two_dimension_single_item_chain;
+//
+//    int ***h_delete_tmp = new int**[Gpu_Db.c_item_len];//用來cudafree用的
+//
+//    for(int i=0;i<Gpu_Db.c_item_len;i++){
+//        h_two_dimension_single_item_chain = new int*[Gpu_Db.c_sid_len[i]];//用來存device指標的二維指標
+//        for(int j=0;j<Gpu_Db.c_sid_len[i];j++){
+//            int *d_one_dimension_tmp;
+//            cudaMalloc(&d_one_dimension_tmp,Gpu_Db.c_seq_len[i][j]*sizeof(int));
+//            cudaMemcpy(d_one_dimension_tmp,Gpu_Db.single_item_chain[i][j],Gpu_Db.c_seq_len[i][j]*sizeof(int),cudaMemcpyHostToDevice);
+//            h_two_dimension_single_item_chain[j] = d_one_dimension_tmp;
 //        }
-//    }else{
+//
+//        int **d_two_dimension_tmp;
+//        cudaMalloc(&d_two_dimension_tmp,Gpu_Db.c_sid_len[i]*sizeof(int*));
+//        cudaMemcpy(d_two_dimension_tmp,h_two_dimension_single_item_chain,Gpu_Db.c_sid_len[i]*sizeof(int*),cudaMemcpyHostToDevice);
+//
+//        h_three_dimension_single_item_chain[i] = d_two_dimension_tmp;
+//        h_delete_tmp[i]=h_two_dimension_single_item_chain;
+//
+//        //delete[] h_two_dimension_single_item_chain;
+//    }
+//    cudaMemcpy(d_single_item_chain,h_three_dimension_single_item_chain,Gpu_Db.c_item_len*sizeof(int**),cudaMemcpyHostToDevice);
+//    //delete[] h_three_dimension_single_item_chain;
+//
+//    int *d_c_sid_len;
+//    cudaMalloc(&d_c_sid_len,Gpu_Db.c_item_len*sizeof(int));
+//    cudaMemcpy(d_c_sid_len,Gpu_Db.c_sid_len,Gpu_Db.c_item_len*sizeof(int),cudaMemcpyHostToDevice);
+//
+//    int **d_c_seq_len;
+//    cudaMalloc(&d_c_seq_len,Gpu_Db.c_item_len*sizeof(int*));
+//    int **h_tmp_c_seq_len = new int*[Gpu_Db.c_item_len];
+//
+//    int **d_chain_sid;
+//    cudaMalloc(&d_chain_sid,Gpu_Db.c_item_len*sizeof(int*));
+//    int **h_tmp_chain_sid = new int*[Gpu_Db.c_item_len];
+//
+//    for(int i=0;i<Gpu_Db.c_item_len;i++){
+//        int *d_tmp;
+//        cudaMalloc(&d_tmp,Gpu_Db.c_sid_len[i]*sizeof(int));
+//        cudaMemcpy(d_tmp,Gpu_Db.c_seq_len[i],Gpu_Db.c_sid_len[i]*sizeof(int),cudaMemcpyHostToDevice);
+//        h_tmp_c_seq_len[i] = d_tmp;
+//
+//        cudaMalloc(&d_tmp,Gpu_Db.c_sid_len[i]*sizeof(int));
+//        cudaMemcpy(d_tmp,Gpu_Db.chain_sid[i],Gpu_Db.c_sid_len[i]*sizeof(int),cudaMemcpyHostToDevice);
+//        h_tmp_chain_sid[i] = d_tmp;
+//    }
+//
+//    cudaMemcpy(d_c_seq_len,h_tmp_c_seq_len,Gpu_Db.c_item_len*sizeof(int*),cudaMemcpyHostToDevice);
+//
+//    cudaMemcpy(d_chain_sid,h_tmp_chain_sid,Gpu_Db.c_item_len*sizeof(int*),cudaMemcpyHostToDevice);
+//
+//
+//
+//    int *d_PEU_Arr;//長度是seq數量 用來算peu(可重用)
+//    cudaMalloc(&d_PEU_Arr,Gpu_Db.sid_len*sizeof(int));
+//    cudaMemset(d_PEU_Arr, 0, Gpu_Db.sid_len * sizeof(int));
+//
+//    int *d_I_list_RSU_Arr,*d_S_list_RSU_Arr;//長度是item數量 用來算rsu(可重用)
+//    cudaMalloc(&d_I_list_RSU_Arr,Gpu_Db.c_item_len*sizeof(int));
+//    cudaMalloc(&d_S_list_RSU_Arr,Gpu_Db.c_item_len*sizeof(int));
+//    cudaMemset(d_I_list_RSU_Arr, 0, Gpu_Db.c_item_len * sizeof(int));
+//    cudaMemset(d_S_list_RSU_Arr, 0, Gpu_Db.c_item_len * sizeof(int));
+//
+//
+//
+//
+//    test<<<1,1>>>(d_single_item_chain,Gpu_Db.c_item_len,d_c_sid_len,d_c_seq_len,d_chain_sid);
+//
+////    for(int i=0;i<Gpu_Db.sid_len;i++){
+////        for(int j=0;j<Gpu_Db.sequence_len[i];j++){
+////            cout<<Gpu_Db.item[i][j]<<" ";
+////        }
+////        //cout<<Gpu_Db.sequence_len[i]<<endl;
+////        cout<<endl;
+////    }
+//
+//    stack<Tree_node> Main_stack;
+//    Tree_node top1_Node;
+//
+//    top1_Node.pattern = "";
+//    top1_Node.ProjectArr_first_position=new int[Gpu_Db.sid_len];
+//    top1_Node.ProjectArr_len=new int[Gpu_Db.sid_len];
+//
+//    //DB clearDBdata;
+//    //DBdata = clearDBdata;
+//    //cout<<Gpu_Db.max_sequence_len;
+//
+//
+//
+//
+//
+//
+//
+//
+//
+//
+////    for(int i=0;i<Gpu_Db.sid_len;i++){
+////        cout<<Gpu_Db.sequence_len[i]<<endl;
+////    }
+////    cout<<endl;
+//    //kernelfunction操作
+//
+//    //如果sequence長度有超過1024需要額外處理
+//    //int *block_per_sequence = new int[Gpu_Db.sid_len];
+////    if(Gpu_Db.max_sequence_len>1024){
+////        threadsPerBlock=1024;
+////        for(int i=0;i<Gpu_Db.sid_len;i++){
+////            blocksPerGrid+= (Gpu_Db.sequence_len[i]+threadsPerBlock-1)/threadsPerBlock;
+////            block_per_sequence[i] = (Gpu_Db.sequence_len[i]+threadsPerBlock-1)/threadsPerBlock;
+////        }
+////    }else{
+////        threadsPerBlock=Gpu_Db.max_sequence_len;
+////        blocksPerGrid=Gpu_Db.sid_len;
+////    }
+//
+//    int *d_PEU_seq;
+//    cudaMalloc(&d_PEU_seq, Gpu_Db.sid_len * sizeof(int));
+//    cudaMemset(d_PEU_seq, 0, Gpu_Db.sid_len * sizeof(int));
+//
+//    int d_PEU_add_len = (Gpu_Db.sid_len + 1024 - 1) / 1024;//看有多少seq在用1024切
+//    int *d_PEU_add_result;
+//    cudaMalloc(&d_PEU_add_result, d_PEU_add_len * sizeof(int));
+//
+//    int *d_Utility_seq;
+//    cudaMalloc(&d_Utility_seq, Gpu_Db.sid_len * sizeof(int));
+//    cudaMemset(d_Utility_seq, 0, Gpu_Db.sid_len * sizeof(int));
+//
+//
+//
+//    int threadsPerBlock;
+//    int blocksPerGrid;
+//
+//
+//
+//    for(int i:Gpu_Db.DB_item_set){
 //        threadsPerBlock=Gpu_Db.max_sequence_len;
 //        blocksPerGrid=Gpu_Db.sid_len;
+////        for(int j=0;j<Gpu_Db.sid_len;j++){
+////            PeuCounter<<<1,Gpu_Db.sequence_len[j]>>>(i,j,d_item_project,d_iu_project,d_ru_project,d_tid_project
+////                    ,d_sequence_len,Gpu_Db.sid_len,d_PEU_seq,d_Utility_seq,d_project_point);
+////        }
+//
+//        //一次開好比較快
+//        PEUcounter<<<blocksPerGrid,threadsPerBlock>>>(i,d_item_project,d_iu_project,d_ru_project,d_tid_project
+//                ,d_sequence_len,Gpu_Db.sid_len,d_PEU_seq,d_Utility_seq);
+//
+////        int *h_PEU_seq=new int[Gpu_Db.sid_len];
+////        cudaMemcpy(h_PEU_seq, d_PEU_seq, Gpu_Db.sid_len*sizeof(int), cudaMemcpyDeviceToHost);
+////
+////        //這裡可以用加總
+////        int PEU_count=0;
+////        for(int j=0;j<Gpu_Db.sid_len;j++){
+////            PEU_count+=h_PEU_seq[j];
+////        }
+////        cout<<"item:"<<i<<endl;
+////        cout<<"PEU:"<<PEU_count<<endl<<endl;
+//        //
+////        int *h_Utility_seq=new int[Gpu_Db.sid_len];
+////        cudaMemcpy(h_Utility_seq, d_Utility_seq, Gpu_Db.sid_len*sizeof(int), cudaMemcpyDeviceToHost);
+//
+//
+//        Array_add_reduction<<<d_PEU_add_len,1024>>>(Gpu_Db.sid_len,d_PEU_seq,d_PEU_add_result);
+//        int *h_PEU_add_result=new int[d_PEU_add_len];
+//        cudaMemcpy(h_PEU_add_result, d_PEU_add_result, d_PEU_add_len*sizeof(int), cudaMemcpyDeviceToHost);
+//
+//        int PEU_count = 0;
+//        for (int j = 0; j < d_PEU_add_len; j++) {
+//            PEU_count += h_PEU_add_result[j];
+//        }
+////        cout<<"item:"<<i<<endl;
+////        cout<<"PEU:"<<PEU_count<<endl;
+//
+//
+//
+//
+//
+////        if(PEU_count<threshold){
+////            continue;
+////        }
+//
+//        cudaMemset(d_PEU_seq, 0, Gpu_Db.sid_len * sizeof(int));
+//        //cout<<"*/*****\n";
 //    }
-
-    int *d_PEU_seq;
-    cudaMalloc(&d_PEU_seq, Gpu_Db.sid_len * sizeof(int));
-    cudaMemset(d_PEU_seq, 0, Gpu_Db.sid_len * sizeof(int));
-
-    int d_PEU_add_len = (Gpu_Db.sid_len + 1024 - 1) / 1024;//看有多少seq在用1024切
-    int *d_PEU_add_result;
-    cudaMalloc(&d_PEU_add_result, d_PEU_add_len * sizeof(int));
-
-    int *d_Utility_seq;
-    cudaMalloc(&d_Utility_seq, Gpu_Db.sid_len * sizeof(int));
-    cudaMemset(d_Utility_seq, 0, Gpu_Db.sid_len * sizeof(int));
-
-
-
-    int threadsPerBlock;
-    int blocksPerGrid;
-
-
-
-    for(int i:Gpu_Db.DB_item_set){
-        threadsPerBlock=Gpu_Db.max_sequence_len;
-        blocksPerGrid=Gpu_Db.sid_len;
-//        for(int j=0;j<Gpu_Db.sid_len;j++){
-//            PeuCounter<<<1,Gpu_Db.sequence_len[j]>>>(i,j,d_item_project,d_iu_project,d_ru_project,d_tid_project
-//                    ,d_sequence_len,Gpu_Db.sid_len,d_PEU_seq,d_Utility_seq,d_project_point);
-//        }
-
-        //一次開好比較快
-        PEUcounter<<<blocksPerGrid,threadsPerBlock>>>(i,d_item_project,d_iu_project,d_ru_project,d_tid_project
-                ,d_sequence_len,Gpu_Db.sid_len,d_PEU_seq,d_Utility_seq);
-
-//        int *h_PEU_seq=new int[Gpu_Db.sid_len];
-//        cudaMemcpy(h_PEU_seq, d_PEU_seq, Gpu_Db.sid_len*sizeof(int), cudaMemcpyDeviceToHost);
 //
-//        //這裡可以用加總
-//        int PEU_count=0;
-//        for(int j=0;j<Gpu_Db.sid_len;j++){
-//            PEU_count+=h_PEU_seq[j];
-//        }
-//        cout<<"item:"<<i<<endl;
-//        cout<<"PEU:"<<PEU_count<<endl<<endl;
-        //
-//        int *h_Utility_seq=new int[Gpu_Db.sid_len];
-//        cudaMemcpy(h_Utility_seq, d_Utility_seq, Gpu_Db.sid_len*sizeof(int), cudaMemcpyDeviceToHost);
-
-
-        Array_add_reduction<<<d_PEU_add_len,1024>>>(Gpu_Db.sid_len,d_PEU_seq,d_PEU_add_result);
-        int *h_PEU_add_result=new int[d_PEU_add_len];
-        cudaMemcpy(h_PEU_add_result, d_PEU_add_result, d_PEU_add_len*sizeof(int), cudaMemcpyDeviceToHost);
-
-        int PEU_count = 0;
-        for (int j = 0; j < d_PEU_add_len; j++) {
-            PEU_count += h_PEU_add_result[j];
-        }
-//        cout<<"item:"<<i<<endl;
-//        cout<<"PEU:"<<PEU_count<<endl;
-
-
-
-
-
-//        if(PEU_count<threshold){
-//            continue;
-//        }
-
-        cudaMemset(d_PEU_seq, 0, Gpu_Db.sid_len * sizeof(int));
-        //cout<<"*/*****\n";
-    }
-
-
-
-//    PEUcounter<<<blocksPerGrid,threadsPerBlock>>>(821024,d_item_project,d_iu_project,d_ru_project,d_tid_project,d_sequence_len,Gpu_Db.sid_len,d_PEU_seq);
 //
-//    int *h_Result=new int[Gpu_Db.sid_len];
-//    cudaMemcpy(h_Result, d_PEU_seq, Gpu_Db.sid_len*sizeof(int), cudaMemcpyDeviceToHost);
 //
-//    for(int j=0;j<Gpu_Db.sid_len;j++){
-//        cout<<h_Result[j]<<endl;
+////    PEUcounter<<<blocksPerGrid,threadsPerBlock>>>(821024,d_item_project,d_iu_project,d_ru_project,d_tid_project,d_sequence_len,Gpu_Db.sid_len,d_PEU_seq);
+////
+////    int *h_Result=new int[Gpu_Db.sid_len];
+////    cudaMemcpy(h_Result, d_PEU_seq, Gpu_Db.sid_len*sizeof(int), cudaMemcpyDeviceToHost);
+////
+////    for(int j=0;j<Gpu_Db.sid_len;j++){
+////        cout<<h_Result[j]<<endl;
+////    }
+//
+//    //project free
+//    cudaFree(d_item_project);
+//    cudaFree(d_iu_project);
+//    cudaFree(d_ru_project);
+//    cudaFree(d_tid_project);
+//
+//    for(int i=0;i<Gpu_Db.sid_len;i++) {
+//        cudaFree(h_item_project[i]);
+//        cudaFree(h_iu_project[i]);
+//        cudaFree(h_ru_project[i]);
+//        cudaFree(h_tid_project[i]);
 //    }
-
-    //project free
-    cudaFree(d_item_project);
-    cudaFree(d_iu_project);
-    cudaFree(d_ru_project);
-    cudaFree(d_tid_project);
-
-    for(int i=0;i<Gpu_Db.sid_len;i++) {
-        cudaFree(h_item_project[i]);
-        cudaFree(h_iu_project[i]);
-        cudaFree(h_ru_project[i]);
-        cudaFree(h_tid_project[i]);
-    }
-
-    delete[] h_item_project;
-    delete[] h_iu_project;
-    delete[] h_ru_project;
-    delete[] h_tid_project;
-    //delete[] h_Result;
-
-    //chain free
-    cudaFree(d_single_item_chain);
-
-    for(int i=0;i<Gpu_Db.c_item_len;i++){
-        cudaFree(h_three_dimension_single_item_chain[i]);
-        for(int j=0;j<Gpu_Db.c_sid_len[i];j++){
-            cudaFree(h_delete_tmp[i][j]);
-        }
-    }
-
-    delete[] h_three_dimension_single_item_chain;
-    delete[] h_delete_tmp;
-
-    cudaFree(d_c_seq_len);
-    cudaFree(d_chain_sid);
-
-    for(int i=0;i<Gpu_Db.c_item_len;i++){
-        cudaFree(h_tmp_c_seq_len[i]);
-        cudaFree(h_tmp_chain_sid[i]);
-    }
-
-    delete [] h_tmp_c_seq_len;
-    delete [] h_tmp_chain_sid;
-
-
-    cudaFree(d_sequence_len);
-    cudaFree(d_PEU_seq);
-
-    // 獲取 GPU 的內存信息
-    status = cudaMemGetInfo(&freeMem, &totalMem);
-
-    if (status == cudaSuccess) {
-        cout << "GPU 總內存: " << totalMem / (1024 * 1024) << " MB" << endl;
-        cout << "GPU 可用內存: " << freeMem / (1024 * 1024) << " MB" << endl;
-    } else {
-        cerr << "無法獲取內存信息，錯誤碼: " << cudaGetErrorString(status) << endl;
-    }
+//
+//    delete[] h_item_project;
+//    delete[] h_iu_project;
+//    delete[] h_ru_project;
+//    delete[] h_tid_project;
+//    //delete[] h_Result;
+//
+//    //chain free
+//    cudaFree(d_single_item_chain);
+//
+//    for(int i=0;i<Gpu_Db.c_item_len;i++){
+//        cudaFree(h_three_dimension_single_item_chain[i]);
+//        for(int j=0;j<Gpu_Db.c_sid_len[i];j++){
+//            cudaFree(h_delete_tmp[i][j]);
+//        }
+//    }
+//
+//    delete[] h_three_dimension_single_item_chain;
+//    delete[] h_delete_tmp;
+//
+//    cudaFree(d_c_seq_len);
+//    cudaFree(d_chain_sid);
+//
+//    for(int i=0;i<Gpu_Db.c_item_len;i++){
+//        cudaFree(h_tmp_c_seq_len[i]);
+//        cudaFree(h_tmp_chain_sid[i]);
+//    }
+//
+//    delete [] h_tmp_c_seq_len;
+//    delete [] h_tmp_chain_sid;
+//
+//
+//    cudaFree(d_sequence_len);
+//    cudaFree(d_PEU_seq);
+//
 //    // 獲取 GPU 的內存信息
 //    status = cudaMemGetInfo(&freeMem, &totalMem);
 //
@@ -665,24 +803,33 @@ void GPUHUSP(const GPU_DB &Gpu_Db){
 //    } else {
 //        cerr << "無法獲取內存信息，錯誤碼: " << cudaGetErrorString(status) << endl;
 //    }
-
-
-//    for(int i=0;i<Gpu_Db.sid_len;i++) {
-//        for (int j = 0; j < Gpu_Db.sequence_len[i]; j++) {
-//            cout << Gpu_Db.item[i][j] << " ";
-//            cout << Gpu_Db.iu[i][j] << " ";
-//            cout << Gpu_Db.ru[i][j] << " ";
-//            cout << Gpu_Db.tid[i][j] << "\n";
-//        }
-//        cout << Gpu_Db.sequence_len[i] << endl;
-//    }
+////    // 獲取 GPU 的內存信息
+////    status = cudaMemGetInfo(&freeMem, &totalMem);
+////
+////    if (status == cudaSuccess) {
+////        cout << "GPU 總內存: " << totalMem / (1024 * 1024) << " MB" << endl;
+////        cout << "GPU 可用內存: " << freeMem / (1024 * 1024) << " MB" << endl;
+////    } else {
+////        cerr << "無法獲取內存信息，錯誤碼: " << cudaGetErrorString(status) << endl;
+////    }
+//
+//
+////    for(int i=0;i<Gpu_Db.sid_len;i++) {
+////        for (int j = 0; j < Gpu_Db.sequence_len[i]; j++) {
+////            cout << Gpu_Db.item[i][j] << " ";
+////            cout << Gpu_Db.iu[i][j] << " ";
+////            cout << Gpu_Db.ru[i][j] << " ";
+////            cout << Gpu_Db.tid[i][j] << "\n";
+////        }
+////        cout << Gpu_Db.sequence_len[i] << endl;
+////    }
 
 }
 
 
 int main() {
     // 指定要讀取的檔案名稱
-    string filename = "YoochooseSamller.txt";
+    string filename = "Yoochoose.txt";
     ifstream file(filename);
     vector<string> lines;
 
@@ -699,18 +846,18 @@ int main() {
 //    cout<<test_max_seq;
     file.close(); // 關閉檔案
 
-    double threshold = 0.01 * DBdata.DButility;
+    double threshold = 0.00024 * DBdata.DButility;
 
+    
+    
     SWUpruning(threshold,DBdata);
 
+    
     GPU_DB Gpu_Db;
 
-    auto start = std::chrono::high_resolution_clock::now();
+
     Bulid_GPU_DB(DBdata,Gpu_Db);
-    auto end = std::chrono::high_resolution_clock::now();
-    // 計算持續時間，並轉換為毫秒
-    std::chrono::duration<double> duration = end - start;
-    std::cout << "Execution time: " << duration.count() << " seconds" << std::endl;
+
 
 //    for(int i=0;i<Gpu_Db.c_item_len;i++){
 //        for(int j=0;j<Gpu_Db.c_sid_len[i];j++){
@@ -723,7 +870,16 @@ int main() {
 
 
 
+    auto start = std::chrono::high_resolution_clock::now();
+    
     GPUHUSP(Gpu_Db);
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    // 計算持續時間，並轉換為毫秒
+    std::chrono::duration<double> duration = end - start;
+    std::cout << "Execution time: " << duration.count() << " seconds" << std::endl;
+
+
 
     return 0;
 }
