@@ -45,6 +45,7 @@ public:
 
     int c_item_len;
     int *c_sid_len;//長度是c_item_len
+    int max_c_sid_len;//哪個item出現在sid中最多次
     int **c_seq_len;//長度是c_item_len 寬度是c_sid_len
 
 };
@@ -248,12 +249,16 @@ void Bulid_GPU_DB(DB &DBdata,GPU_DB &Gpu_Db){
     Gpu_Db.c_seq_len = new int*[item_len]; //每個item在不同sid中的seq長度(實例)
 
     int i_index=0, sid_len, j_index=0,seq_len;
+    int max_sid_len=0;
     for(auto i=DBdata.single_item_chain.begin();i!=DBdata.single_item_chain.end();i++){
         sid_len = i->second.size();
         Gpu_Db.single_item_chain[i_index] = new int*[sid_len];
         Gpu_Db.chain_sid[i_index] = new int[sid_len];
 
         Gpu_Db.c_sid_len[i_index] = sid_len;
+        if(max_sid_len<sid_len){
+            max_sid_len=sid_len;
+        }
         Gpu_Db.c_seq_len[i_index] = new int[sid_len];
 
         j_index = 0;
@@ -269,6 +274,7 @@ void Bulid_GPU_DB(DB &DBdata,GPU_DB &Gpu_Db){
         i_index++;
     }
 
+    Gpu_Db.max_c_sid_len = max_sid_len;
 
 }
 
@@ -302,6 +308,12 @@ __global__ void PeuCounter(int project_item,int sid,
 __global__ void Array_add_reduction(int Array_len,int *inputArr,int *outputArr){
     __shared__ int shared_data[1024];
     int tid = threadIdx.x;
+    /*
+     * 假設有10個block，每個block有1024個thread
+     * blockIdx.x = 0~9
+     * blockDim.x = 1024
+     * threadIdx.x = 0~1023
+     * */
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     shared_data[tid] = (idx < Array_len) ? inputArr[idx] : 0;
@@ -344,6 +356,74 @@ __global__ void test1(int *d_item,int *d_tid,int *d_iu,int *d_ru,int *d_offsets,
 }
 
 
+
+__global__ void test2(int *d_flat_single_item_chain,int *d_chain_offsets_level1,int *d_chain_offsets_level2,
+                      int *d_flat_chain_sid,int *d_chain_sid_offsets,
+                      int d_c_item_len,
+                      int *d_c_sid_len,
+                      int *d_flat_c_seq_len,int *d_c_seq_len_offsets
+                      ){
+
+    //index = offsets_level2[offsets_level1[item] + sid] + instance 三維陣列
+
+    //int index = d_c_seq_len_offsets[item] + sid; 二維陣列
+    //int value = d_flat_c_seq_len[index];
+
+    for(int i = 0;i<d_c_item_len;i++){
+        for(int j=0;j<d_c_sid_len[i];j++){
+            for(int k=0;k<d_flat_c_seq_len[d_c_seq_len_offsets[i]+j];k++){
+                printf("item[%d]sid[%d]instance[%d] = %d \n",i,d_flat_chain_sid[d_chain_sid_offsets[i]+j],k,d_flat_single_item_chain[d_chain_offsets_level2[d_chain_offsets_level1[i]+j]+k]);
+            }
+        }
+    }
+//    for(int i = 0;i<d_sid_len;i++){
+//        for(int j=d_offsets[i];j<d_offsets[i]+d_sequence_len[i];j++){
+//            printf("i[%d]j[%d] = %d ",i,j-d_offsets[i],d_item[j]);
+//        }
+//
+//        printf("sequence_len:%d\n",d_sequence_len[i]);
+//    }
+//    printf("%d\n",d_sid_len);
+}
+
+__global__ void count_chain_memory_size(int d_c_item_len,
+                                        int *d_c_sid_len,
+                                        int *d_flat_c_seq_len,int *d_c_seq_len_offsets,
+                                        int *d_flat_single_item_chain,int *d_chain_offsets_level1,int *d_chain_offsets_level2,
+                                        int *d_item_memory_overall_size){
+    
+    
+    __shared__ int sub_data[1024];//把資料寫到shared memory且縮小到1024內（如果有超過1024）且順便用梯形公式算好
+
+    //index = d_chain_offsets_level2[d_chain_offsets_level1[item] + sid] + instance 三維陣列
+
+    //int index = d_c_seq_len_offsets[item] + sid; 二維陣列
+    //int value = d_flat_c_seq_len[index];
+    
+    int sum = 0,first_project,seq_len,n;
+    //d_c_sid_len[blockIdx.x]=>每個item的sid數量
+    for (int i = threadIdx.x; i < d_c_sid_len[blockIdx.x]; i += blockDim.x) {
+        first_project = d_flat_single_item_chain[d_chain_offsets_level2[d_chain_offsets_level1[blockIdx.x] + i] + 0];//blockIdx.x對應item,i對應sid
+        seq_len = d_flat_c_seq_len[d_c_seq_len_offsets[blockIdx.x] + i ];
+        n = seq_len - first_project - 1;
+        sum += (n+1)*n/2;//梯形公式
+    }
+    
+    sub_data[threadIdx.x] = sum;
+    __syncthreads();
+
+    // 使用平行 reduction 計算陣列的總和
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (blockDim.x < s) {
+            sub_data[blockDim.x] += sub_data[blockDim.x + s];
+        }
+        __syncthreads();
+    }
+    
+    
+}
+
+
 void GPUHUSP(const GPU_DB &Gpu_Db){
     vector<int> flat_item, flat_tid, flat_iu, flat_ru;
     vector<int> db_offsets;
@@ -360,8 +440,8 @@ void GPUHUSP(const GPU_DB &Gpu_Db){
         offset += Gpu_Db.sequence_len[i];
     }
 
-    int* d_item, *d_tid, *d_iu, *d_ru;
-    int* d_db_offsets, *d_sequence_len;//offsets裡面存陣列偏移量 從0開始
+    int *d_item, *d_tid, *d_iu, *d_ru;
+    int *d_db_offsets, *d_sequence_len;//offsets裡面存陣列偏移量 從0開始
 
     cudaMalloc(&d_item, flat_item.size() * sizeof(int));
     cudaMalloc(&d_tid, flat_tid.size() * sizeof(int));
@@ -411,10 +491,14 @@ void GPUHUSP(const GPU_DB &Gpu_Db){
         offsets_level1：記錄每個 item 在 offsets_level2 中的 "起始" 索引。
         offsets_level2：記錄每個 sid 在 flat_single_item_chain 中的 "起始" 索引。
 
+        三維陣列
         single_item_chain[item][sid][instance]
         等於
         index = offsets_level2[offsets_level1[item] + sid] + instance
 
+        二維陣列
+        int index = d_c_seq_len_offsets[row] + col;
+        int value = d_flat_c_seq_len[index];
     */
     //single item chain 初始
     vector<int> flat_single_item_chain;
@@ -478,8 +562,42 @@ void GPUHUSP(const GPU_DB &Gpu_Db){
     cudaMemcpy(d_flat_c_seq_len, flat_c_seq_len.data(), flat_c_seq_len.size() * sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(d_c_seq_len_offsets, c_seq_len_offsets.data(), c_seq_len_offsets.size() * sizeof(int), cudaMemcpyHostToDevice);
 
+    int *d_c_sid_len;
+    cudaMalloc(&d_c_sid_len, Gpu_Db.c_item_len * sizeof(int));
+    cudaMemcpy(d_c_sid_len, Gpu_Db.c_sid_len , Gpu_Db.c_item_len * sizeof(int), cudaMemcpyHostToDevice);
 
-    cout<<"";
+
+//    test2<<<1,1>>>(d_flat_single_item_chain,d_chain_offsets_level1,d_chain_offsets_level2,
+//                   d_flat_chain_sid,d_chain_sid_offsets,
+//                   Gpu_Db.c_item_len,
+//                   d_c_sid_len,
+//                   d_flat_c_seq_len,d_c_seq_len_offsets
+//                   );
+//    cudaDeviceSynchronize();
+//    cout<<"";
+
+
+    //算DFS所需要的最大空間（用最壞情況估 a,aa,a...）    
+
+    int *d_item_memory_overall_size;
+    //每個item在每個投影seq中第一個投影點到投影資料庫的末端長度算梯形公式的加總
+    //長度是c_item_len
+
+    cudaMalloc(&d_item_memory_overall_size,Gpu_Db.c_item_len * sizeof(int));
+    cudaMemset(d_item_memory_overall_size, 0, Gpu_Db.c_item_len * sizeof(int));
+
+    int thread_num=0;
+    if(Gpu_Db.max_c_sid_len>1024){
+        thread_num=1024;
+    }else{
+        thread_num=Gpu_Db.max_c_sid_len;
+    }
+    
+    count_chain_memory_size<<<Gpu_Db.c_item_len,thread_num>>>(Gpu_Db.c_item_len,
+                                                        d_c_sid_len,
+                                                        d_flat_chain_sid,d_chain_sid_offsets,
+                                                        d_flat_single_item_chain,d_chain_offsets_level1,d_chain_offsets_level2,
+                                                        d_item_memory_overall_size);
 
 //    size_t freeMem = 0;
 //    size_t totalMem = 0;
@@ -829,7 +947,8 @@ void GPUHUSP(const GPU_DB &Gpu_Db){
 
 int main() {
     // 指定要讀取的檔案名稱
-    string filename = "Yoochoose.txt";
+    string filename = "YoochooseSamller.txt";
+    //string filename = "Yoochoose.txt";
     ifstream file(filename);
     vector<string> lines;
 
@@ -846,13 +965,13 @@ int main() {
 //    cout<<test_max_seq;
     file.close(); // 關閉檔案
 
-    double threshold = 0.00024 * DBdata.DButility;
+    double threshold = 0.01 * DBdata.DButility;
+    //double threshold = 0.00024 * DBdata.DButility;
 
-    
-    
+
     SWUpruning(threshold,DBdata);
 
-    
+
     GPU_DB Gpu_Db;
 
 
@@ -871,9 +990,9 @@ int main() {
 
 
     auto start = std::chrono::high_resolution_clock::now();
-    
+
     GPUHUSP(Gpu_Db);
-    
+
     auto end = std::chrono::high_resolution_clock::now();
     // 計算持續時間，並轉換為毫秒
     std::chrono::duration<double> duration = end - start;
