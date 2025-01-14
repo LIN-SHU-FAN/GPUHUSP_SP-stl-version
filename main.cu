@@ -10,6 +10,9 @@
 #include <stack>
 #include <chrono>
 
+#include <thrust/device_vector.h>
+#include <thrust/extrema.h>
+
 using namespace std;
 class DB{
 public:
@@ -345,6 +348,8 @@ __global__ void test(int ***d_single_item_chain,int d_c_item_len,int *d_c_sid_le
 }
 
 __global__ void test1(int *d_item,int *d_tid,int *d_iu,int *d_ru,int *d_offsets,int *d_sequence_len,int d_sid_len){
+    //int flat_index = sequence_len_offsets[sid] + pos;
+    //flat_item[flat_index];
     for(int i = 0;i<d_sid_len;i++){
         for(int j=d_offsets[i];j<d_offsets[i]+d_sequence_len[i];j++){
             printf("i[%d]j[%d] = %d ",i,j-d_offsets[i],d_item[j]);
@@ -365,6 +370,7 @@ __global__ void test2(int *d_flat_single_item_chain,int *d_chain_offsets_level1,
                       ){
 
     //index = offsets_level2[offsets_level1[item] + sid] + instance 三維陣列
+    //這裡的sid不是db中真的sid 要用d_flat_chain_sid解碼才知道db的sid
 
     //int index = d_c_seq_len_offsets[item] + sid; 二維陣列
     //int value = d_flat_c_seq_len[index];
@@ -386,41 +392,54 @@ __global__ void test2(int *d_flat_single_item_chain,int *d_chain_offsets_level1,
 //    printf("%d\n",d_sid_len);
 }
 
-__global__ void count_chain_memory_size(int d_c_item_len,
+__global__ void count_chain_memory_size(int *d_sequence_len,
+                                        int *d_flat_chain_sid,int *d_chain_sid_offsets,
+                                        int d_c_item_len,
                                         int *d_c_sid_len,
                                         int *d_flat_c_seq_len,int *d_c_seq_len_offsets,
                                         int *d_flat_single_item_chain,int *d_chain_offsets_level1,int *d_chain_offsets_level2,
                                         int *d_item_memory_overall_size){
-    
-    
+
+
     __shared__ int sub_data[1024];//把資料寫到shared memory且縮小到1024內（如果有超過1024）且順便用梯形公式算好
 
     //index = d_chain_offsets_level2[d_chain_offsets_level1[item] + sid] + instance 三維陣列
 
     //int index = d_c_seq_len_offsets[item] + sid; 二維陣列
     //int value = d_flat_c_seq_len[index];
-    
+
     int sum = 0,first_project,seq_len,n;
     //d_c_sid_len[blockIdx.x]=>每個item的sid數量
     for (int i = threadIdx.x; i < d_c_sid_len[blockIdx.x]; i += blockDim.x) {
         first_project = d_flat_single_item_chain[d_chain_offsets_level2[d_chain_offsets_level1[blockIdx.x] + i] + 0];//blockIdx.x對應item,i對應sid
-        seq_len = d_flat_c_seq_len[d_c_seq_len_offsets[blockIdx.x] + i ];
+        seq_len = d_sequence_len[d_flat_chain_sid[d_chain_sid_offsets[blockIdx.x]+i]];
         n = seq_len - first_project - 1;
-        sum += (n+1)*n/2;//梯形公式
+
+        n>1?n=(n+1)*n/2:n=n;//梯形公式
+
+//        printf("item=%d sid=%d real sid=%d seq_len=%d first_project=%d n=%d\n",
+//               blockIdx.x,i,d_flat_chain_sid[d_chain_sid_offsets[blockIdx.x]+i],seq_len,first_project,n);
+        sum += n;
     }
-    
+
     sub_data[threadIdx.x] = sum;
+    //printf("threadIdx.x=%d sum=%d\n",threadIdx.x,sum);
+
     __syncthreads();
 
     // 使用平行 reduction 計算陣列的總和
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (blockDim.x < s) {
-            sub_data[blockDim.x] += sub_data[blockDim.x + s];
+        if (threadIdx.x < s) {
+            sub_data[threadIdx.x] += sub_data[threadIdx.x + s];
         }
         __syncthreads();
     }
-    
-    
+    //printf("blockDim.x=%d threadIdx.x=%d\n",blockIdx.x,threadIdx.x);
+    if(threadIdx.x==0){
+        //printf("blockIdx.x=%d sub_data[0]=%d\n",blockIdx.x,sub_data[0]);
+        d_item_memory_overall_size[blockIdx.x] = sub_data[0];
+    }
+
 }
 
 
@@ -441,7 +460,8 @@ void GPUHUSP(const GPU_DB &Gpu_Db){
     }
 
     int *d_item, *d_tid, *d_iu, *d_ru;
-    int *d_db_offsets, *d_sequence_len;//offsets裡面存陣列偏移量 從0開始
+    int *d_db_offsets;//offsets裡面存陣列偏移量 從0開始
+    int *d_sequence_len;
 
     cudaMalloc(&d_item, flat_item.size() * sizeof(int));
     cudaMalloc(&d_tid, flat_tid.size() * sizeof(int));
@@ -577,7 +597,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db){
 //    cout<<"";
 
 
-    //算DFS所需要的最大空間（用最壞情況估 a,aa,a...）    
+    //算DFS所需要的最大空間（用最壞情況估 a,a,a,a...）
 
     int *d_item_memory_overall_size;
     //每個item在每個投影seq中第一個投影點到投影資料庫的末端長度算梯形公式的加總
@@ -592,12 +612,30 @@ void GPUHUSP(const GPU_DB &Gpu_Db){
     }else{
         thread_num=Gpu_Db.max_c_sid_len;
     }
-    
-    count_chain_memory_size<<<Gpu_Db.c_item_len,thread_num>>>(Gpu_Db.c_item_len,
-                                                        d_c_sid_len,
-                                                        d_flat_chain_sid,d_chain_sid_offsets,
-                                                        d_flat_single_item_chain,d_chain_offsets_level1,d_chain_offsets_level2,
-                                                        d_item_memory_overall_size);
+
+    count_chain_memory_size<<<Gpu_Db.c_item_len,thread_num>>>(d_sequence_len,
+                                                                            d_flat_chain_sid,d_chain_sid_offsets,
+                                                                            Gpu_Db.c_item_len,
+                                                                            d_c_sid_len,
+                                                                            d_flat_chain_sid,d_chain_sid_offsets,
+                                                                            d_flat_single_item_chain,d_chain_offsets_level1,d_chain_offsets_level2,
+                                                                            d_item_memory_overall_size);
+    cudaDeviceSynchronize();
+
+    int *h_item_memory_overall_size = new int[Gpu_Db.c_item_len];
+    cudaMemcpy(h_item_memory_overall_size, d_item_memory_overall_size, Gpu_Db.c_item_len*sizeof(int), cudaMemcpyDeviceToHost);
+
+    int single_item_max_memory=0;
+    for(int i=0;i<Gpu_Db.c_item_len;i++){
+        if(single_item_max_memory<h_item_memory_overall_size[i]){
+            single_item_max_memory=h_item_memory_overall_size[i];
+        }
+        //cout<<"item:"<<i<<"="<<h_item_memory_overall_size[i]<<endl;
+    }
+
+    cout<<"single_item_max_memory:"<<single_item_max_memory<<endl;
+
+
 
 //    size_t freeMem = 0;
 //    size_t totalMem = 0;
@@ -947,8 +985,8 @@ void GPUHUSP(const GPU_DB &Gpu_Db){
 
 int main() {
     // 指定要讀取的檔案名稱
-    string filename = "YoochooseSamller.txt";
-    //string filename = "Yoochoose.txt";
+    //string filename = "YoochooseSamller.txt";
+    string filename = "Yoochoose.txt";
     ifstream file(filename);
     vector<string> lines;
 
@@ -965,8 +1003,8 @@ int main() {
 //    cout<<test_max_seq;
     file.close(); // 關閉檔案
 
-    double threshold = 0.01 * DBdata.DButility;
-    //double threshold = 0.00024 * DBdata.DButility;
+    //double threshold = 0.01 * DBdata.DButility;
+    double threshold = 0.00024 * DBdata.DButility;
 
 
     SWUpruning(threshold,DBdata);
