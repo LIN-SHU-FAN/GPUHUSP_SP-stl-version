@@ -51,9 +51,10 @@ public:
     int max_c_sid_len;//哪個item出現在sid中最多次
     int **c_seq_len;//長度是c_item_len 寬度是c_sid_len
 
+    //vector<int> max_n;//每個single item的 max(每個投影的sid中sid長度-第一個投影點) ->結果是每個single item的最大值
 };
 
-class Tree_node{
+class Tree_node{//要存pattern、chain、i and s list
 public:
     string pattern;
     int *ProjectArr_first_position,*ProjectArr_len;
@@ -253,7 +254,8 @@ void Bulid_GPU_DB(DB &DBdata,GPU_DB &Gpu_Db){
 
     int i_index=0, sid_len, j_index=0,seq_len;
     int max_sid_len=0;
-    for(auto i=DBdata.single_item_chain.begin();i!=DBdata.single_item_chain.end();i++){
+    //int max_n;
+    for(auto i=DBdata.single_item_chain.begin();i!=DBdata.single_item_chain.end();i++){//歷遍item
         sid_len = i->second.size();
         Gpu_Db.single_item_chain[i_index] = new int*[sid_len];
         Gpu_Db.chain_sid[i_index] = new int[sid_len];
@@ -264,16 +266,24 @@ void Bulid_GPU_DB(DB &DBdata,GPU_DB &Gpu_Db){
         }
         Gpu_Db.c_seq_len[i_index] = new int[sid_len];
 
+        //max_n = 0;
         j_index = 0;
-        for(auto j = i->second.begin();j!=i->second.end();j++){
+        for(auto j = i->second.begin();j!=i->second.end();j++){//歷遍sid
             seq_len = j->second.size();
             Gpu_Db.single_item_chain[i_index][j_index] = j->second.data();
             Gpu_Db.chain_sid[i_index][j_index] = j->first;
 
             Gpu_Db.c_seq_len[i_index][j_index] = seq_len;
 
+            int tmp=Gpu_Db.sequence_len[j->first]-Gpu_Db.single_item_chain[i_index][j_index][0]-1;
+//            if(max_n<tmp){
+//                max_n = tmp;
+//            }
+
             j_index++;
         }
+
+        //Gpu_Db.max_n.push_back(max_n);
         i_index++;
     }
 
@@ -415,7 +425,7 @@ __global__ void count_chain_memory_size(int *d_sequence_len,
         seq_len = d_sequence_len[d_flat_chain_sid[d_chain_sid_offsets[blockIdx.x]+i]];
         n = seq_len - first_project - 1;
 
-        n>1?n=(n+1)*n/2:n=n;//梯形公式
+        n>1 ? n=(n+1)*n/2 : n=n;//梯形公式
 
 //        printf("item=%d sid=%d real sid=%d seq_len=%d first_project=%d n=%d\n",
 //               blockIdx.x,i,d_flat_chain_sid[d_chain_sid_offsets[blockIdx.x]+i],seq_len,first_project,n);
@@ -441,7 +451,66 @@ __global__ void count_chain_memory_size(int *d_sequence_len,
     }
 
 }
+__global__ void reduce_max(int *input, int *output, int n) {
+    __shared__ int shared_data[1024];
 
+    int tid = threadIdx.x;
+    int global_tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    shared_data[tid] = (global_tid < n) ? input[global_tid] : INT_MIN;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride /= 2) {
+        if (tid < stride) {
+            shared_data[tid] = max(shared_data[tid], shared_data[tid + stride]);
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        output[blockIdx.x] = shared_data[0];
+    }
+}
+
+__global__ void count_chain_offset_size(int *d_sequence_len,//DB長度
+                                        int *d_flat_chain_sid,int *d_chain_sid_offsets,//真正sid
+                                        int *d_flat_single_item_chain,int *d_chain_offsets_level1,int *d_chain_offsets_level2,//chain資料
+                                        int *d_c_sid_len,//每個item的sid投影數量
+                                        int *d_item_memory_overall_size//輸出
+                                        ){
+    __shared__ int sub_data[1024];
+    int max_n=INT_MIN,first_project,seq_len,n;
+    for (int i = threadIdx.x; i < d_c_sid_len[blockIdx.x]; i += blockDim.x) {
+        first_project = d_flat_single_item_chain[d_chain_offsets_level2[d_chain_offsets_level1[blockIdx.x] + i] + 0];//blockIdx.x對應item,i對應sid
+        seq_len = d_sequence_len[d_flat_chain_sid[d_chain_sid_offsets[blockIdx.x]+i]];
+        n = seq_len - first_project - 1;
+
+        max_n = (n>max_n) ? n:max_n ;
+    }
+    sub_data[threadIdx.x] = max_n;
+
+    __syncthreads();
+
+
+    // 使用平行 reduction 計算陣列的MAX
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) {
+            sub_data[threadIdx.x] = max(sub_data[threadIdx.x],sub_data[threadIdx.x + s]);
+        }
+        __syncthreads();
+    }
+    //printf("blockDim.x=%d threadIdx.x=%d\n",blockIdx.x,threadIdx.x);
+    if(threadIdx.x==0){
+
+        d_item_memory_overall_size[blockIdx.x] = sub_data[0] * d_c_sid_len[blockIdx.x];//max_n * item的sid投影點數量
+        printf("blockIdx.x=%d sub_data[0]=%d d_c_sid_len[blockIdx.x]=%d d_item_memory_overall_size[blockIdx.x]=%d\n",blockIdx.x,sub_data[0],d_c_sid_len[blockIdx.x],d_item_memory_overall_size[blockIdx.x]);
+    }
+
+}
+
+__global__ void Deep1_Peu_count(){
+
+}
 
 void GPUHUSP(const GPU_DB &Gpu_Db){
     vector<int> flat_item, flat_tid, flat_iu, flat_ru;
@@ -525,7 +594,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db){
     vector<int> chain_offsets_level1(Gpu_Db.c_item_len + 1, 0);// 長度為 c_item_len + 1，最後一個值是總 sid 數量
     vector<int> chain_offsets_level2;
 
-    vector<int> flat_chain_sid;
+    vector<int> flat_chain_sid;//真正的sid
     vector<int> chain_sid_offsets;
     int chain_sid_offset=0;
 
@@ -622,18 +691,61 @@ void GPUHUSP(const GPU_DB &Gpu_Db){
                                                                             d_item_memory_overall_size);
     cudaDeviceSynchronize();
 
-    int *h_item_memory_overall_size = new int[Gpu_Db.c_item_len];
-    cudaMemcpy(h_item_memory_overall_size, d_item_memory_overall_size, Gpu_Db.c_item_len*sizeof(int), cudaMemcpyDeviceToHost);
+    int num_blocks = (Gpu_Db.c_item_len + 1023) / 1024;
+    int *d_item_memory_max;
+    cudaMalloc(&d_item_memory_max, num_blocks * sizeof(int));
+
+    reduce_max<<<num_blocks,1024>>>(d_item_memory_overall_size,d_item_memory_max,Gpu_Db.c_item_len);
+
+    int *h_item_memory_max = new int[num_blocks];
+    cudaMemcpy(h_item_memory_max, d_item_memory_max, num_blocks * sizeof(int), cudaMemcpyDeviceToHost);
 
     int single_item_max_memory=0;
-    for(int i=0;i<Gpu_Db.c_item_len;i++){
-        if(single_item_max_memory<h_item_memory_overall_size[i]){
-            single_item_max_memory=h_item_memory_overall_size[i];
+    for(int i=0;i<num_blocks;i++){
+        if(single_item_max_memory<h_item_memory_max[i]){
+            single_item_max_memory=h_item_memory_max[i];
         }
-        //cout<<"item:"<<i<<"="<<h_item_memory_overall_size[i]<<endl;
+        //cout<<h_item_memory_max[i]<<endl;
     }
 
     cout<<"single_item_max_memory:"<<single_item_max_memory<<endl;
+
+
+    //建樹上節點的chain空間
+    int d_tree_node_chain_global_memory_index=0;//目前用多少空間
+    int *d_tree_node_chain_global_memory;//裝資料->投影位置
+    cudaMalloc(&d_tree_node_chain_global_memory, single_item_max_memory * sizeof(int));
+
+    //max_n
+    //重用d_item_memory_overall_size算每個single中最大的offset大小
+    //可重用thread_num
+    count_chain_offset_size<<<Gpu_Db.c_item_len,thread_num>>>(d_sequence_len,
+                                                              d_flat_chain_sid,d_chain_sid_offsets,
+                                                              d_flat_single_item_chain,d_chain_offsets_level1,d_chain_offsets_level2,
+                                                              d_c_sid_len,
+                                                              d_item_memory_overall_size
+                                                              );
+    cudaDeviceSynchronize();
+    //開始遞迴
+    for(int i=0;i<Gpu_Db.c_item_len;i++){
+
+    }
+
+
+
+//    int *h_item_memory_overall_size = new int[Gpu_Db.c_item_len];
+//    cudaMemcpy(h_item_memory_overall_size, d_item_memory_overall_size, Gpu_Db.c_item_len*sizeof(int), cudaMemcpyDeviceToHost);
+//
+//    int single_item_max_memory=0;
+//    for(int i=0;i<Gpu_Db.c_item_len;i++){
+//        if(single_item_max_memory<h_item_memory_overall_size[i]){
+//            single_item_max_memory=h_item_memory_overall_size[i];
+//        }
+//        //cout<<"item:"<<i<<"="<<h_item_memory_overall_size[i]<<endl;
+//    }
+
+
+
 
 
 
@@ -984,9 +1096,11 @@ void GPUHUSP(const GPU_DB &Gpu_Db){
 
 
 int main() {
+    auto start = std::chrono::high_resolution_clock::now();
+
     // 指定要讀取的檔案名稱
-    //string filename = "YoochooseSamller.txt";
-    string filename = "Yoochoose.txt";
+    string filename = "YoochooseSamller.txt";
+    //string filename = "Yoochoose.txt";
     ifstream file(filename);
     vector<string> lines;
 
@@ -1003,8 +1117,8 @@ int main() {
 //    cout<<test_max_seq;
     file.close(); // 關閉檔案
 
-    //double threshold = 0.01 * DBdata.DButility;
-    double threshold = 0.00024 * DBdata.DButility;
+    double threshold = 0.01 * DBdata.DButility;
+    //double threshold = 0.00024 * DBdata.DButility;
 
 
     SWUpruning(threshold,DBdata);
@@ -1027,15 +1141,17 @@ int main() {
 
 
 
-    auto start = std::chrono::high_resolution_clock::now();
+
 
     GPUHUSP(Gpu_Db);
+
+
+
 
     auto end = std::chrono::high_resolution_clock::now();
     // 計算持續時間，並轉換為毫秒
     std::chrono::duration<double> duration = end - start;
     std::cout << "Execution time: " << duration.count() << " seconds" << std::endl;
-
 
 
     return 0;
