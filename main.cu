@@ -503,7 +503,7 @@ __global__ void count_chain_offset_size(int *d_sequence_len,//DB長度
     if(threadIdx.x==0){
 
         d_item_memory_overall_size[blockIdx.x] = sub_data[0] * d_c_sid_len[blockIdx.x];//max_n * item的sid投影點數量
-        printf("blockIdx.x=%d sub_data[0]=%d d_c_sid_len[blockIdx.x]=%d d_item_memory_overall_size[blockIdx.x]=%d\n",blockIdx.x,sub_data[0],d_c_sid_len[blockIdx.x],d_item_memory_overall_size[blockIdx.x]);
+        //printf("blockIdx.x=%d sub_data[0]=%d d_c_sid_len[blockIdx.x]=%d d_item_memory_overall_size[blockIdx.x]=%d\n",blockIdx.x,sub_data[0],d_c_sid_len[blockIdx.x],d_item_memory_overall_size[blockIdx.x]);
     }
 
 }
@@ -513,10 +513,15 @@ __global__ void Deep1_Peu_count(){
 }
 
 void GPUHUSP(const GPU_DB &Gpu_Db){
+
+    //###################
+    //project DB初始
+    //###################
+    
     vector<int> flat_item, flat_tid, flat_iu, flat_ru;
     vector<int> db_offsets;
     int offset = 0;
-    //project DB初始
+
     for (int i = 0; i < Gpu_Db.sid_len; i++) {
         db_offsets.push_back(offset);
         for (int j = 0; j < Gpu_Db.sequence_len[i]; j++) {
@@ -589,7 +594,11 @@ void GPUHUSP(const GPU_DB &Gpu_Db){
         int index = d_c_seq_len_offsets[row] + col;
         int value = d_flat_c_seq_len[index];
     */
+
+    //###################
     //single item chain 初始
+    //###################
+
     vector<int> flat_single_item_chain;
     vector<int> chain_offsets_level1(Gpu_Db.c_item_len + 1, 0);// 長度為 c_item_len + 1，最後一個值是總 sid 數量
     vector<int> chain_offsets_level2;
@@ -665,8 +674,10 @@ void GPUHUSP(const GPU_DB &Gpu_Db){
 //    cudaDeviceSynchronize();
 //    cout<<"";
 
-
+    //###################
+    //計算chain空間
     //算DFS所需要的最大空間（用最壞情況估 a,a,a,a...）
+    //###################
 
     int *d_item_memory_overall_size;
     //每個item在每個投影seq中第一個投影點到投影資料庫的末端長度算梯形公式的加總
@@ -700,22 +711,28 @@ void GPUHUSP(const GPU_DB &Gpu_Db){
     int *h_item_memory_max = new int[num_blocks];
     cudaMemcpy(h_item_memory_max, d_item_memory_max, num_blocks * sizeof(int), cudaMemcpyDeviceToHost);
 
-    int single_item_max_memory=0;
+    int tree_node_chain_max_memory=0;
     for(int i=0;i<num_blocks;i++){
-        if(single_item_max_memory<h_item_memory_max[i]){
-            single_item_max_memory=h_item_memory_max[i];
+        if(tree_node_chain_max_memory<h_item_memory_max[i]){
+            tree_node_chain_max_memory=h_item_memory_max[i];
         }
         //cout<<h_item_memory_max[i]<<endl;
     }
 
-    cout<<"single_item_max_memory:"<<single_item_max_memory<<endl;
+    cout<<"tree_node_chain_max_memory:"<<tree_node_chain_max_memory<<endl;
 
 
+    //###################
     //建樹上節點的chain空間
+    //###################
     int d_tree_node_chain_global_memory_index=0;//目前用多少空間
     int *d_tree_node_chain_global_memory;//裝資料->投影位置
-    cudaMalloc(&d_tree_node_chain_global_memory, single_item_max_memory * sizeof(int));
+    cudaMalloc(&d_tree_node_chain_global_memory, tree_node_chain_max_memory * sizeof(int));
 
+    //###################
+    //計算offsets和chain_sid空間
+    //max(max_n* item的sid投影點數量)
+    //###################
     //max_n
     //重用d_item_memory_overall_size算每個single中最大的offset大小
     //可重用thread_num
@@ -726,6 +743,35 @@ void GPUHUSP(const GPU_DB &Gpu_Db){
                                                               d_item_memory_overall_size
                                                               );
     cudaDeviceSynchronize();
+
+    //重用num_blocks d_item_memory_max
+    reduce_max<<<num_blocks,1024>>>(d_item_memory_overall_size,d_item_memory_max,Gpu_Db.c_item_len);
+    //重用h_item_memory_max
+    cudaMemcpy(h_item_memory_max, d_item_memory_max, num_blocks * sizeof(int), cudaMemcpyDeviceToHost);
+
+    int tree_node_chain_offset_max_memory=0;
+    for(int i=0;i<num_blocks;i++){
+        if(tree_node_chain_offset_max_memory<h_item_memory_max[i]){
+            tree_node_chain_offset_max_memory=h_item_memory_max[i];
+        }
+        //tree_node_chain_offset_max_memory = (h_item_memory_max[i]>tree_node_chain_offset_max_memory)?h_item_memory_max[i]:tree_node_chain_offset_max_memory;
+    }
+
+    cout<<"tree_node_chain_offset_max_memory:"<<tree_node_chain_offset_max_memory<<endl;
+
+    //###################
+    //建樹上節點的chain的offset和chain_sid(真正的sid)空間
+    //###################
+    int d_tree_node_chain_offset_global_memory_index=0;//目前用多少空間
+    int *d_tree_node_chain_offset_global_memory;//裝chain的offset
+    cudaMalloc(&d_tree_node_chain_offset_global_memory, tree_node_chain_offset_max_memory * sizeof(int));
+
+    int d_tree_node_chain_sid_global_memory_index=0;//目前用多少空間
+    int *d_tree_node_chain_sid_global_memory;//裝chain_sid(真正的sid)
+    cudaMalloc(&d_tree_node_chain_sid_global_memory, tree_node_chain_offset_max_memory * sizeof(int));
+    
+    
+    
     //開始遞迴
     for(int i=0;i<Gpu_Db.c_item_len;i++){
 
@@ -1099,7 +1145,7 @@ int main() {
     auto start = std::chrono::high_resolution_clock::now();
 
     // 指定要讀取的檔案名稱
-    string filename = "YoochooseSamller.txt";
+    string filename = "YoochooseSmaller.txt";
     //string filename = "Yoochoose.txt";
     ifstream file(filename);
     vector<string> lines;
