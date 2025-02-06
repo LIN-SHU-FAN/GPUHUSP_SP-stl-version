@@ -517,7 +517,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db){
     //###################
     //project DB初始
     //###################
-    
+
     vector<int> flat_item, flat_tid, flat_iu, flat_ru;
     vector<int> db_offsets;
     int offset = 0;
@@ -726,9 +726,12 @@ void GPUHUSP(const GPU_DB &Gpu_Db){
     //建樹上節點的chain空間
     //###################
     int d_tree_node_chain_global_memory_index=0;//目前用多少空間
-    int *d_tree_node_chain_global_memory;//裝資料->投影位置
-    cudaMalloc(&d_tree_node_chain_global_memory, tree_node_chain_max_memory * sizeof(int));
+    int *d_tree_node_chain_global_memory_instance;//裝資料->投影位置
+    cudaMalloc(&d_tree_node_chain_global_memory_instance, tree_node_chain_max_memory * sizeof(int));
 
+    int *d_tree_node_chain_global_memory_utility;//裝Utility
+    cudaMalloc(&d_tree_node_chain_global_memory_utility, tree_node_chain_max_memory * sizeof(int));
+    
     //###################
     //計算offsets和chain_sid空間
     //max(max_n* item的sid投影點數量)
@@ -769,9 +772,9 @@ void GPUHUSP(const GPU_DB &Gpu_Db){
     int d_tree_node_chain_sid_global_memory_index=0;//目前用多少空間
     int *d_tree_node_chain_sid_global_memory;//裝chain_sid(真正的sid)
     cudaMalloc(&d_tree_node_chain_sid_global_memory, tree_node_chain_offset_max_memory * sizeof(int));
-    
-    
-    
+
+
+
     //開始遞迴
     for(int i=0;i<Gpu_Db.c_item_len;i++){
 
