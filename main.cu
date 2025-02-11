@@ -13,6 +13,9 @@
 #include <thrust/device_vector.h>
 #include <thrust/extrema.h>
 
+//2025/02/11紀錄
+//可以在一開始就開成攤平陣列減少重複開陣列的時間
+
 using namespace std;
 class DB{
 public:
@@ -28,6 +31,7 @@ public:
     unordered_set<int> DB_item_set;
 
     map<int,map<int,vector<int>>> single_item_chain;//item->sid->vector(實例)
+    map<int,map<int,vector<int>>> indices_table;//sid->item->vector(實例)
 };
 
 class GPU_DB {
@@ -35,6 +39,7 @@ public:
     vector<int> DB_item_set;//index->item
     unordered_map<int,int> DB_item_set_hash;//item->index
 
+    //DB
     int **item,**tid;
     int **iu,**ru;
 
@@ -42,8 +47,8 @@ public:
     int *sequence_len;
     int max_sequence_len;
 
-
-    int ***single_item_chain;//item->sid->instance (item已經做hash所以從0開始對應index)
+    //single item chain
+    int ***single_item_chain;//item->sid->instance (item已經做hash所以從0開始對應index) 紀錄single item 在DB上的位置
     int **chain_sid;//長度是c_item_len 寬度是c_sid_len（紀錄single item 存在在哪些sid）
 
     int c_item_len;
@@ -52,6 +57,16 @@ public:
     int **c_seq_len;//長度是c_item_len 寬度是c_sid_len
 
     //vector<int> max_n;//每個single item的 max(每個投影的sid中sid長度-第一個投影點) ->結果是每個single item的最大值
+
+    //item indices table(這裡建構在攤平陣列就好)
+    map<int,map<int,vector<int>>> indices_table;//sid->item->vector(實例)
+//    vector<vector<vector<int>>> indices_table;//sid->item->instance 紀錄sid中的item分別 在DB上的哪些位置
+//    vector<vector<int>> table_item;//長度是t_sid_len 寬度是t_item_len（紀錄真正的item）
+//
+//    int t_sid_len;
+//    vector<int> t_item_len;//長度是t_sid_len
+//    vector<vector<int>> t_seq_len;//長度是t_sid_len 寬度是t_item_len
+
 };
 
 class Tree_node{//要存pattern、chain、i and s list
@@ -159,6 +174,7 @@ void SWUpruning(double threshold,DB &DBdata){
 
                 update_DB.DB_item_set.insert(DBdata.item[i][j]);
                 update_DB.single_item_chain[DBdata.item[i][j]][update_DB.sequence_len.size()].push_back(item.size()-1);
+                update_DB.indices_table[update_DB.sequence_len.size()][DBdata.item[i][j]].push_back(item.size()-1);
             }
         }
 
@@ -190,7 +206,9 @@ void Bulid_GPU_DB(DB &DBdata,GPU_DB &Gpu_Db){
     for (size_t i = 0; i < Gpu_Db.DB_item_set.size(); i++) {
         Gpu_Db.DB_item_set_hash[Gpu_Db.DB_item_set[i]] = static_cast<int>(i); // 值 -> 索引
     }
-
+    
+    
+    ///建DB
     Gpu_Db.sid_len=int(DBdata.sequence_len.size());
     Gpu_Db.sequence_len = new int[Gpu_Db.sid_len];
 
@@ -242,7 +260,7 @@ void Bulid_GPU_DB(DB &DBdata,GPU_DB &Gpu_Db){
 
     //Gpu_Db.DB_item_set=DBdata.DB_item_set;
 
-
+    ///建single_item_chain
     int item_len=DBdata.single_item_chain.size();
 
     Gpu_Db.single_item_chain = new int**[item_len];
@@ -288,7 +306,14 @@ void Bulid_GPU_DB(DB &DBdata,GPU_DB &Gpu_Db){
     }
 
     Gpu_Db.max_c_sid_len = max_sid_len;
-
+    
+    ///建indices_table
+    Gpu_Db.indices_table=DBdata.indices_table;
+//    for(auto i=DBdata.indices_table.begin();i!=DBdata.indices_table.end();i++){//歷遍sid
+//        for(auto j = i->second.begin();j!=i->second.end();j++){//歷遍item
+//            Gpu_Db.indices_table
+//        }
+//    }
 }
 
 
@@ -377,7 +402,7 @@ __global__ void test2(int *d_flat_single_item_chain,int *d_chain_offsets_level1,
                       int d_c_item_len,
                       int *d_c_sid_len,
                       int *d_flat_c_seq_len,int *d_c_seq_len_offsets
-                      ){
+){
 
     //index = offsets_level2[offsets_level1[item] + sid] + instance 三維陣列
     //這裡的sid不是db中真的sid 要用d_flat_chain_sid解碼才知道db的sid
@@ -477,7 +502,7 @@ __global__ void count_chain_offset_size(int *d_sequence_len,//DB長度
                                         int *d_flat_single_item_chain,int *d_chain_offsets_level1,int *d_chain_offsets_level2,//chain資料
                                         int *d_c_sid_len,//每個item的sid投影數量
                                         int *d_item_memory_overall_size//輸出
-                                        ){
+){
     __shared__ int sub_data[1024];
     int max_n=INT_MIN,first_project,seq_len,n;
     for (int i = threadIdx.x; i < d_c_sid_len[blockIdx.x]; i += blockDim.x) {
@@ -694,12 +719,12 @@ void GPUHUSP(const GPU_DB &Gpu_Db){
     }
 
     count_chain_memory_size<<<Gpu_Db.c_item_len,thread_num>>>(d_sequence_len,
-                                                                            d_flat_chain_sid,d_chain_sid_offsets,
-                                                                            Gpu_Db.c_item_len,
-                                                                            d_c_sid_len,
-                                                                            d_flat_chain_sid,d_chain_sid_offsets,
-                                                                            d_flat_single_item_chain,d_chain_offsets_level1,d_chain_offsets_level2,
-                                                                            d_item_memory_overall_size);
+                                                              d_flat_chain_sid,d_chain_sid_offsets,
+                                                              Gpu_Db.c_item_len,
+                                                              d_c_sid_len,
+                                                              d_flat_chain_sid,d_chain_sid_offsets,
+                                                              d_flat_single_item_chain,d_chain_offsets_level1,d_chain_offsets_level2,
+                                                              d_item_memory_overall_size);
     cudaDeviceSynchronize();
 
     int num_blocks = (Gpu_Db.c_item_len + 1023) / 1024;
@@ -731,7 +756,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db){
 
     int *d_tree_node_chain_global_memory_utility;//裝Utility
     cudaMalloc(&d_tree_node_chain_global_memory_utility, tree_node_chain_max_memory * sizeof(int));
-    
+
     //###################
     //計算offsets和chain_sid空間
     //max(max_n* item的sid投影點數量)
@@ -744,7 +769,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db){
                                                               d_flat_single_item_chain,d_chain_offsets_level1,d_chain_offsets_level2,
                                                               d_c_sid_len,
                                                               d_item_memory_overall_size
-                                                              );
+    );
     cudaDeviceSynchronize();
 
     //重用num_blocks d_item_memory_max
