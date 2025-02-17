@@ -206,8 +206,8 @@ void Bulid_GPU_DB(DB &DBdata,GPU_DB &Gpu_Db){
     for (size_t i = 0; i < Gpu_Db.DB_item_set.size(); i++) {
         Gpu_Db.DB_item_set_hash[Gpu_Db.DB_item_set[i]] = static_cast<int>(i); // 值 -> 索引
     }
-    
-    
+
+
     ///建DB
     Gpu_Db.sid_len=int(DBdata.sequence_len.size());
     Gpu_Db.sequence_len = new int[Gpu_Db.sid_len];
@@ -306,7 +306,7 @@ void Bulid_GPU_DB(DB &DBdata,GPU_DB &Gpu_Db){
     }
 
     Gpu_Db.max_c_sid_len = max_sid_len;
-    
+
     ///建indices_table
     Gpu_Db.indices_table=DBdata.indices_table;
 //    for(auto i=DBdata.indices_table.begin();i!=DBdata.indices_table.end();i++){//歷遍sid
@@ -537,7 +537,7 @@ __global__ void Deep1_Peu_count(){
 
 }
 
-void GPUHUSP(const GPU_DB &Gpu_Db){
+void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test){
 
     //###################
     //project DB初始
@@ -600,7 +600,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db){
         對於 Item 1，二維陣列在 flat_chain 的偏移量為 2（Item 0 有 2 個 sid）。
         對於 Item 2，二維陣列在 flat_chain 的偏移量為 5（Item 0 和 Item 1 共計 5 個 sid）。
 
-        offsets_level2=[0, 3, 5, 6, 10, 12, 13]
+        offsets_level2=[0, 3, 5, 6, 10, 12, 17]
         對於 Item 0, SID 0，偏移量為 0。
         對於 Item 0, SID 1，偏移量為 3。
         對於 Item 1, SID 0，偏移量為 5。
@@ -614,6 +614,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db){
         single_item_chain[item][sid][instance]
         等於
         index = offsets_level2[offsets_level1[item] + sid] + instance
+        value = d_flat_single_item_chain[index]
 
         二維陣列
         int index = d_c_seq_len_offsets[row] + col;
@@ -621,11 +622,11 @@ void GPUHUSP(const GPU_DB &Gpu_Db){
     */
 
     //###################
-    //single item chain 初始
+    ///single item chain 初始
     //###################
 
     vector<int> flat_single_item_chain;
-    vector<int> chain_offsets_level1(Gpu_Db.c_item_len + 1, 0);// 長度為 c_item_len + 1，最後一個值是總 sid 數量
+    vector<int> chain_offsets_level1(Gpu_Db.c_item_len + 1, 0);// 長度為 c_item_len + 1
     vector<int> chain_offsets_level2;
 
     vector<int> flat_chain_sid;//真正的sid
@@ -660,6 +661,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db){
 
         c_seq_len_offset+=Gpu_Db.c_sid_len[i];
     }
+    chain_offsets_level2.push_back(int(flat_single_item_chain.size()));//把最後一個位置放入flat_single_item_chain總長度
 
     int *d_flat_single_item_chain,*d_chain_offsets_level1,*d_chain_offsets_level2;
 
@@ -698,6 +700,110 @@ void GPUHUSP(const GPU_DB &Gpu_Db){
 //                   );
 //    cudaDeviceSynchronize();
 //    cout<<"";
+
+
+    //###################
+    ///indices table 初始
+    //###################
+
+    //    vector<vector<vector<int>>> indices_table;//sid->item->instance 紀錄sid中的item分別 在DB上的哪些位置
+    //    vector<vector<int>> table_item;//長度是t_sid_len 寬度是t_item_len（紀錄真正的item）
+    //
+    //    int table_sid_len;
+    //    vector<int> table_item_len;//長度是table_sid_len
+    //    vector<vector<int>> table_seq_len;//長度是table_sid_len 寬度是table_item_len
+
+    vector<int> flat_indices_table;//sid->item->instance 紀錄sid中的item分別 在DB上的哪些位置
+    vector<int> table_offsets_level1;// 長度為 sid_len + 1
+    table_offsets_level1.push_back(0);
+    vector<int> table_offsets_level2;
+
+    vector<int> flat_table_item;//長度是table_sid_len 寬度是t_item_len（紀錄真正的item）
+    vector<int> table_item_offsets;
+    int table_item_offset=0;
+
+    int table_sid_len=Gpu_Db.sid_len;
+
+    vector<int> table_item_len;//長度是table_sid_len，放每個sid有多少item
+
+    vector<int> flat_table_seq_len;//長度是table_sid_len 寬度是table_item_len，放每個sid中每個item中有多少instance
+    vector<int> table_seq_len_offsets;
+    int table_seq_len_offset=0;
+
+
+
+    int count_table_item_len;
+
+    for(auto i=Gpu_Db.indices_table.begin();i!=Gpu_Db.indices_table.end();i++){
+        count_table_item_len = 0;
+
+        table_item_offsets.push_back(table_item_offset);
+
+        table_seq_len_offsets.push_back(table_seq_len_offset);
+
+        for(auto j=i->second.begin();j!=i->second.end();j++){
+            table_offsets_level2.push_back(int(flat_indices_table.size()));
+
+            flat_table_item.push_back(Gpu_Db.DB_item_set_hash.at(j->first));
+
+            table_item_offset++;
+
+            count_table_item_len++;
+
+            table_seq_len_offset++;
+
+
+            flat_table_seq_len.push_back(int(j->second.size()));
+
+
+            for(auto k=j->second.begin();k!=j->second.end();k++){
+                flat_indices_table.push_back(*k);
+            }
+
+        }
+        table_offsets_level1.push_back(int(table_offsets_level2.size()));
+
+
+        table_item_len.push_back(count_table_item_len);
+
+    }
+    table_offsets_level2.push_back(int(flat_indices_table.size()));
+
+
+    int *d_flat_indices_table,*d_table_offsets_level1,*d_table_offsets_level2;
+
+    cudaMalloc(&d_flat_indices_table, flat_indices_table.size() * sizeof(int));
+    cudaMalloc(&d_table_offsets_level1, table_offsets_level1.size() * sizeof(int));
+    cudaMalloc(&d_table_offsets_level2, table_offsets_level2.size() * sizeof(int));
+
+    cudaMemcpy(d_flat_indices_table, flat_indices_table.data(), flat_indices_table.size() * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_table_offsets_level1, table_offsets_level1.data(), table_offsets_level1.size() * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_table_offsets_level2, table_offsets_level2.data(), table_offsets_level2.size() * sizeof(int), cudaMemcpyHostToDevice);
+
+    int *d_flat_table_item,*d_table_item_offsets;
+
+    cudaMalloc(&d_flat_table_item, flat_table_item.size() * sizeof(int));
+    cudaMalloc(&d_table_item_offsets, table_item_offsets.size() * sizeof(int));
+
+    cudaMemcpy(d_flat_table_item, flat_table_item.data(), flat_table_item.size() * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_table_item_offsets, table_item_offsets.data(), table_item_offsets.size() * sizeof(int), cudaMemcpyHostToDevice);
+
+    int *d_table_item_len;
+
+    cudaMalloc(&d_table_item_len, table_item_len.size() * sizeof(int));
+
+    cudaMemcpy(d_table_item_len, table_item_len.data(), table_item_len.size() * sizeof(int), cudaMemcpyHostToDevice);
+
+    int *d_flat_table_seq_len,*d_table_seq_len_offsets;
+
+    cudaMalloc(&d_flat_table_seq_len, flat_table_seq_len.size() * sizeof(int));
+    cudaMalloc(&d_table_seq_len_offsets, table_seq_len_offsets.size() * sizeof(int));
+
+    cudaMemcpy(d_flat_table_seq_len, flat_table_seq_len.data(), flat_table_seq_len.size() * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_table_seq_len_offsets, table_seq_len_offsets.data(), table_seq_len_offsets.size() * sizeof(int), cudaMemcpyHostToDevice);
+
+
+
 
     //###################
     //計算chain空間
@@ -1217,7 +1323,7 @@ int main() {
 
 
 
-    GPUHUSP(Gpu_Db);
+    GPUHUSP(Gpu_Db,DBdata);
 
 
 
