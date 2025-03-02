@@ -570,27 +570,37 @@ __global__ void count_single_item_s_candidate(int total_item_num,
 //    int value = d_flat_chain_sid[index];
 
 
-    int item = d_sid_map_item[blockIdx.x];
+    int project_item = d_sid_map_item[blockIdx.x];
     int f_sid = blockIdx.x-d_sid_accumulate[blockIdx.x];
 
-    int sid = d_flat_chain_sid[d_chain_sid_offsets[item] + f_sid];
+    int sid = d_flat_chain_sid[d_chain_sid_offsets[project_item] + f_sid];
 
-    int sid_item_num = d_table_item_len[sid];//這個sid有多少item
+    int sid_item_num = d_table_item_len[sid];//這個sid有多少種item
 
 //    index = offsets_level2[offsets_level1[item] + sid] + instance
 //    value = d_flat_single_item_chain[index]
     //blockDim.x = 1024
-    int item_fist_project_position = d_flat_indices_table[d_table_offsets_level2[d_table_offsets_level1[sid]+item]+0];
-    int table_item_last_project_position;
+    int item_fist_project_position = d_flat_indices_table[d_table_offsets_level2[d_table_offsets_level1[sid]+project_item]+0];
+    int table_item_last_project_position,last_instance;
     for (int i = threadIdx.x; i < sid_item_num; i += blockDim.x) {
         //i對應到table中sid有多少item
         //table中sid中每個i的最後一個位置=>這裡應該有問題
-        table_item_last_project_position=d_flat_indices_table[d_table_offsets_level2[d_table_offsets_level1[sid]+(i+1)]-1];
+        last_instance = d_table_offsets_level2[d_table_offsets_level1[sid]+i+1];
+        table_item_last_project_position=d_flat_indices_table[d_table_offsets_level2[d_table_offsets_level1[sid]+i+1]-1];//想一下最後一個投影點怎取
+
+        if(sid==21){//看最長那個序列有沒有對
+            printf("sid=%d item=%d item_fist_project_position=%d i=%d table_item_last_project_position=%d s_item=%d\n",sid,project_item,item_fist_project_position,i,table_item_last_project_position,d_flat_table_item[d_table_item_offsets[sid]+i]);
+        }
+
+
         if(item_fist_project_position<table_item_last_project_position){
             //item_fist_project_position的tid比較小＝>是s candidate
+
             if(d_tid[d_db_offsets[sid]+item_fist_project_position]<d_tid[d_db_offsets[sid]+table_item_last_project_position]){
-                printf("sid=%d item=%d i=%d s_item=%d item_tid=%d s_candidate=%d sid_item_num=%d\n",sid,item,i,d_item[d_db_offsets[sid]+i],d_tid[d_db_offsets[sid]+item_fist_project_position],d_tid[d_db_offsets[sid]+table_item_last_project_position],sid_item_num);
-                atomicOr(&d_single_item_s_candidate[item*total_item_num+i],1);
+
+                //printf("sid=%d item=%d i=%d s_item=%d item_tid=%d s_candidate=%d sid_item_num=%d\n",sid,project_item,i,)
+                //printf("sid=%d item=%d i=%d s_item=%d item_tid=%d s_candidate=%d sid_item_num=%d\n",sid,project_item,i,d_item[d_db_offsets[sid]+i],d_tid[d_db_offsets[sid]+item_fist_project_position],d_tid[d_db_offsets[sid]+table_item_last_project_position],sid_item_num);
+                atomicOr(&d_single_item_s_candidate[project_item*total_item_num+i],1);
             }
         }
     }
