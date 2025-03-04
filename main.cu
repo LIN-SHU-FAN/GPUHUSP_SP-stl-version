@@ -20,6 +20,9 @@ const int max_num_threads = 1024;
 //2025/02/11紀錄
 //可以在一開始就開成攤平陣列減少重複開陣列的時間
 
+//2025/03/04紀錄
+//最後可以想一下哪邊可以同時做，有些步驟應該不用循序做
+
 using namespace std;
 class DB{
 public:
@@ -439,13 +442,11 @@ __global__ void test2(int *d_flat_single_item_chain,int *d_chain_offsets_level1,
 }
 
 ///可以用多 Block 分段歸約 會比現在用的Grid-stride loop快 但缺點是要額外開記憶體存中間值
-__global__ void count_chain_memory_size(int *d_sequence_len,
-                                        int *d_flat_chain_sid,int *d_chain_sid_offsets,
-                                        int d_c_item_len,
-                                        int *d_c_sid_len,
-                                        int *d_flat_c_seq_len,int *d_c_seq_len_offsets,
-                                        int *d_flat_single_item_chain,int *d_chain_offsets_level1,int *d_chain_offsets_level2,
-                                        int *d_item_memory_overall_size){
+__global__ void count_chain_memory_size(int * __restrict__  d_sequence_len,
+                                        int * __restrict__  d_flat_chain_sid,int * __restrict__  d_chain_sid_offsets,
+                                        int * __restrict__  d_c_sid_len,
+                                        int *  __restrict__ d_flat_single_item_chain,int *  __restrict__ d_chain_offsets_level1,int * __restrict__  d_chain_offsets_level2,
+                                        int * __restrict__ d_item_memory_overall_size){
 
 
     __shared__ int sub_data[max_num_threads];//把資料寫到shared memory且縮小到1024內（如果有超過1024）且順便用梯形公式算好
@@ -530,13 +531,14 @@ __global__ void reduceMaxKernel(const int* __restrict__ d_in,
     // 最後 32 個 thread 繼續使用 unrolled warp
     // (此時不再需要 __syncthreads() 因為同一 warp 中可保證同步)
     if(tid < 32) {
+        volatile int* v_sdata = sdata;
         // 依序消去 stride=32, 16, 8, 4, 2, 1
-        if(tid + 32 < blockDim.x && sdata[tid + 32] > sdata[tid])  sdata[tid] = sdata[tid + 32];
-        if(tid + 16 < blockDim.x && sdata[tid + 16] > sdata[tid])  sdata[tid] = sdata[tid + 16];
-        if(tid + 8 < blockDim.x && sdata[tid +  8] > sdata[tid])  sdata[tid] = sdata[tid +  8];
-        if(tid + 4 < blockDim.x && sdata[tid +  4] > sdata[tid])  sdata[tid] = sdata[tid +  4];
-        if(tid + 2 < blockDim.x && sdata[tid +  2] > sdata[tid])  sdata[tid] = sdata[tid +  2];
-        if(tid + 1 < blockDim.x && sdata[tid +  1] > sdata[tid])  sdata[tid] = sdata[tid +  1];
+        if(tid + 32 < blockDim.x && v_sdata[tid + 32] > v_sdata[tid])  v_sdata[tid] = v_sdata[tid + 32];
+        if(tid + 16 < blockDim.x && v_sdata[tid + 16] > v_sdata[tid])  v_sdata[tid] = v_sdata[tid + 16];
+        if(tid + 8 < blockDim.x && v_sdata[tid +  8] > v_sdata[tid])  v_sdata[tid] = v_sdata[tid +  8];
+        if(tid + 4 < blockDim.x && v_sdata[tid +  4] > v_sdata[tid])  v_sdata[tid] = v_sdata[tid +  4];
+        if(tid + 2 < blockDim.x && v_sdata[tid +  2] > v_sdata[tid])  v_sdata[tid] = v_sdata[tid +  2];
+        if(tid + 1 < blockDim.x && v_sdata[tid +  1] > v_sdata[tid])  v_sdata[tid] = v_sdata[tid +  1];
     }
 
     // 用 block 內的第 0 個 thread 將結果寫到 global memory
@@ -545,12 +547,12 @@ __global__ void reduceMaxKernel(const int* __restrict__ d_in,
     }
 }
 
-__global__ void count_chain_offset_size(int *d_sequence_len,//DB長度
-                                        int *d_flat_chain_sid,int *d_chain_sid_offsets,//真正sid
-                                        int *d_flat_single_item_chain,int *d_chain_offsets_level1,int *d_chain_offsets_level2,//chain資料
-                                        int *d_c_sid_len,//每個item的sid投影數量
-                                        int *d_item_memory_overall_size,//輸出
-                                        int *d_max_n
+__global__ void count_chain_offset_size(int *  __restrict__  d_sequence_len,//DB長度
+                                        int * __restrict__  d_flat_chain_sid,int * __restrict__  d_chain_sid_offsets,//真正sid
+                                        int * __restrict__  d_flat_single_item_chain,int *  __restrict__  d_chain_offsets_level1,int *  __restrict__ d_chain_offsets_level2,//chain資料
+                                        int * __restrict__  d_c_sid_len,//每個item的sid投影數量
+                                        int * __restrict__  d_item_memory_overall_size,//輸出
+                                        int * __restrict__  d_max_n
 ){
     __shared__ int sub_data[max_num_threads];
     int max_n=INT_MIN,first_project,seq_len,n;
@@ -603,18 +605,15 @@ __device__ int binary_search_in_thread(const int* arr, int size, int key)
 
 
 __global__ void count_single_item_s_candidate(int total_item_num,
-                                              int *d_sid_map_item,
-                                              int *d_sid_accumulate,
-                                              int *d_item,
-                                              int *d_tid,
-                                              int *d_db_offsets,
-                                              int *d_c_sid_len,
-                                              int *d_flat_single_item_chain,int *d_chain_offsets_level1,int *d_chain_offsets_level2,
-                                              int *d_flat_chain_sid,int *d_chain_sid_offsets,
-                                              int *d_table_item_len,
-                                              int *d_flat_indices_table,int *d_table_offsets_level1,int *d_table_offsets_level2,
-                                              int *d_flat_table_item,int *d_table_item_offsets,
-                                              int *d_single_item_s_candidate
+                                              int *__restrict__ d_sid_map_item,
+                                              int *__restrict__ d_sid_accumulate,
+                                              int *__restrict__ d_tid,
+                                              int *__restrict__ d_db_offsets,
+                                              int *__restrict__ d_flat_chain_sid,int *__restrict__ d_chain_sid_offsets,
+                                              int *__restrict__ d_table_item_len,
+                                              int *__restrict__ d_flat_indices_table,int *__restrict__ d_table_offsets_level1,int *__restrict__ d_table_offsets_level2,
+                                              int *__restrict__ d_flat_table_item,int *__restrict__ d_table_item_offsets,
+                                              int *__restrict__ d_single_item_s_candidate
 ){
     //blockIdx.x = 0～single item chain總共有多少sid
     //d_sid_map_item[blockIdx.x] = item
@@ -681,17 +680,17 @@ __global__ void count_single_item_s_candidate(int total_item_num,
 }
 
 __global__ void count_single_item_i_candidate(int total_item_num,
-                                              int *d_sid_map_item,
-                                              int *d_sid_accumulate,
-                                              int *d_item,
-                                              int *d_tid,
-                                              int *d_db_offsets,
-                                              int *d_sequence_len,
-                                              int *d_c_sid_len,
-                                              int *d_flat_c_seq_len,int *d_c_seq_len_offsets,
-                                              int *d_flat_single_item_chain,int *d_chain_offsets_level1,int *d_chain_offsets_level2,
-                                              int *d_flat_chain_sid,int *d_chain_sid_offsets,
-                                              int *d_single_item_i_candidate
+                                              int* __restrict__ d_sid_map_item,
+                                              int* __restrict__ d_sid_accumulate,
+                                              int* __restrict__ d_item,
+                                              int* __restrict__ d_tid,
+                                              int* __restrict__ d_db_offsets,
+                                              int* __restrict__ d_sequence_len,
+                                              int* __restrict__ d_c_sid_len,
+                                              int * __restrict__ d_flat_c_seq_len,int * __restrict__ d_c_seq_len_offsets,
+                                              int *__restrict__ d_flat_single_item_chain,int * __restrict__ d_chain_offsets_level1,int * __restrict__ d_chain_offsets_level2,
+                                              int *__restrict__ d_flat_chain_sid,int *__restrict__ d_chain_sid_offsets,
+                                              int *__restrict__ d_single_item_i_candidate
 ){
     //blockIdx.x = 0～single item chain總共有多少sid
     //threadIdx.x ＝ 0～1024 代表chain中sid上的投影點
@@ -726,6 +725,69 @@ __global__ void count_single_item_i_candidate(int total_item_num,
 
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// Kernel: reduceSum2Dkernel
+// 每個 block 處理一個 row (或說一個陣列)，長度 = n。
+// 內部採用 parallel reduction (加總)，含「2倍讀取」與「unrolled warp」等技巧。
+// 同時有 boundary check，確保 n 不是2次方時亦能正確。
+////////////////////////////////////////////////////////////////////////////////
+__global__ void reduceSum2Dkernel(const int* __restrict__ d_data,  // [n*n] 大小
+                                  int* __restrict__ d_sums,       // [n] 大小，存放每列的加總
+                                  int   n)
+{
+    extern __shared__ int sdata[];   // 動態配置的 Shared memory，大小=blockDim.x * sizeof(int)
+    int tid      = threadIdx.x;
+    int row      = blockIdx.x;      // 每個 block 負責一個 row (陣列)
+    int baseIdx  = row * n;         // 這個 row 在 d_data 裡的起始位置 (row-major)
+
+    // (1) 對全域資料做 2 倍讀取
+    //     globalIdx = baseIdx + tid
+    //     secondIdx = baseIdx + tid + blockDim.x
+    int globalIdx = baseIdx + tid;
+    int myVal = (globalIdx < baseIdx + n) ? d_data[globalIdx] : 0; // 若超出 row 範圍就當 0
+    int secondIdx = globalIdx + blockDim.x;
+    if (secondIdx < baseIdx + n) {
+        myVal += d_data[secondIdx];
+    }
+
+    sdata[tid] = myVal;
+    __syncthreads();
+
+    // (2) block 內平行歸約 (reduction)
+    //     先用 for-loop 收斂到 32 以內，每回合 stride 減半
+    for (int stride = blockDim.x / 2; stride > 32; stride >>= 1) {
+        if (tid < stride) {
+            sdata[tid] += sdata[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    // (3) 最後 32 個 threads 使用 unrolled warp 處理
+    //     在同一個 warp 中，不需 __syncthreads()，但要加索引檢查
+    ///要用volatile才會對
+    if (tid < 32) {
+        volatile int* v_sdata = sdata;
+        if (tid + 32 < blockDim.x) v_sdata[tid] += v_sdata[tid + 32];
+        if (tid + 16 < blockDim.x) v_sdata[tid] += v_sdata[tid + 16];
+        if (tid +  8 < blockDim.x) v_sdata[tid] += v_sdata[tid +  8];
+        if (tid +  4 < blockDim.x) v_sdata[tid] += v_sdata[tid +  4];
+        if (tid +  2 < blockDim.x) v_sdata[tid] += v_sdata[tid +  2];
+        if (tid +  1 < blockDim.x) v_sdata[tid] += v_sdata[tid +  1];
+    }
+
+    // (4) block 內的第 0 號 thread，把結果寫回 d_sums[row]
+    if (tid == 0) {
+        d_sums[row] = sdata[0];
+    }
+}
+//A和B點對點相乘後結果放到A
+__global__ void Arr_Multiplication(int *A,int *B,int n)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx<n){
+        A[idx] = A[idx] * B[idx];
+    }
+}
 __global__ void Deep1_Peu_count(){
 
 }
@@ -1022,9 +1084,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test){
 
     count_chain_memory_size<<<Gpu_Db.c_item_len,max_c_sid_len_num_thread>>>(d_sequence_len,
                                                               d_flat_chain_sid,d_chain_sid_offsets,
-                                                              Gpu_Db.c_item_len,
                                                               d_c_sid_len,
-                                                              d_flat_chain_sid,d_chain_sid_offsets,
                                                               d_flat_single_item_chain,d_chain_offsets_level1,d_chain_offsets_level2,
                                                               d_item_memory_overall_size);
     cudaDeviceSynchronize();
@@ -1210,18 +1270,15 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test){
     count_single_item_s_candidate<<<sid_num,max_num_threads>>>(Gpu_Db.c_item_len,
                                                            d_sid_map_item,
                                                            d_sid_accumulate,
-                                                           d_item,
                                                            d_tid,
                                                            d_db_offsets,
-                                                           d_c_sid_len,
-                                                           d_flat_single_item_chain,d_chain_offsets_level1,d_chain_offsets_level2,
                                                            d_flat_chain_sid,d_chain_sid_offsets,
                                                            d_table_item_len,
                                                            d_flat_indices_table,d_table_offsets_level1,d_table_offsets_level2,
                                                            d_flat_table_item,d_table_item_offsets,
                                                            d_single_item_s_candidate
                                                            );
-    cudaDeviceSynchronize();
+//    cudaDeviceSynchronize();
 
 
 //    int *h_test = new int[Gpu_Db.c_item_len* Gpu_Db.c_item_len];
@@ -1251,6 +1308,16 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test){
     cudaDeviceSynchronize();
 
 //    int *h_test = new int[Gpu_Db.c_item_len* Gpu_Db.c_item_len];
+//    cudaMemcpy(h_test, d_single_item_s_candidate, Gpu_Db.c_item_len* Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
+//
+//    for(int i=0;i<Gpu_Db.c_item_len;i++){
+//        cout<<i<<" : ";
+//        for(int j=0;j<Gpu_Db.c_item_len;j++){
+//            cout<<h_test[i*Gpu_Db.c_item_len+j]<<" ";
+//        }
+//        cout<<endl;
+//    }
+//
 //    cudaMemcpy(h_test, d_single_item_i_candidate, Gpu_Db.c_item_len* Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
 //
 //    for(int i=0;i<Gpu_Db.c_item_len;i++){
@@ -1262,6 +1329,71 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test){
 //    }
 
 
+    // ---------------------------
+    // 啟動 kernel 做 parallel reduction
+    // ---------------------------
+    // 一個 block 處理一個 row => gridDim = n
+    int *d_single_item_s_candidate_sum;
+    cudaMalloc(&d_single_item_s_candidate_sum, Gpu_Db.c_item_len*sizeof(int));
+
+    int *d_single_item_i_candidate_sum;
+    cudaMalloc(&d_single_item_i_candidate_sum, Gpu_Db.c_item_len*sizeof(int));
+
+    int gridSize = Gpu_Db.c_item_len;
+
+    // blockSize 根據 n 來簡單選擇「最小的 1024 與 n 」，也可加更複雜的「最佳化」邏輯
+    blockSize = (Gpu_Db.c_item_len < max_num_threads) ? Gpu_Db.c_item_len : max_num_threads;
+
+    // 動態 shared memory 大小
+    size_t smemSize = blockSize * sizeof(int);
+
+    // 呼叫 kernel
+    reduceSum2Dkernel<<<gridSize, blockSize, smemSize>>>(
+            d_single_item_s_candidate, d_single_item_s_candidate_sum, Gpu_Db.c_item_len);
+
+    reduceSum2Dkernel<<<gridSize, blockSize, smemSize>>>(
+            d_single_item_i_candidate, d_single_item_i_candidate_sum, Gpu_Db.c_item_len);
+    cudaDeviceSynchronize();
+
+
+
+    int *h_sums= new int[Gpu_Db.c_item_len];
+    cudaMemcpy(h_sums, d_single_item_s_candidate_sum, Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
+
+    cout<<"d_single_item_s_candidate_sum:";
+    for(int i=0;i<Gpu_Db.c_item_len;i++){
+        cout<<h_sums[i]<<" ";
+    }
+    cout<<endl;
+
+    cudaMemcpy(h_sums, d_single_item_i_candidate_sum, Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
+
+    cout<<"d_single_item_i_candidate_sum:";
+    for(int i=0;i<Gpu_Db.c_item_len;i++){
+        cout<<h_sums[i]<<" ";
+    }
+    cout<<endl;
+
+    cudaMemcpy(h_sums, d_max_n, Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
+
+    cout<<"d_max_n:";
+    for(int i=0;i<Gpu_Db.c_item_len;i++){
+        cout<<h_sums[i]<<" ";
+    }
+    cout<<endl;
+
+    blockSize = (Gpu_Db.c_item_len < max_num_threads) ? Gpu_Db.c_item_len : max_num_threads;
+    gridSize = (Gpu_Db.c_item_len + (blockSize - 1))/blockSize;
+    Arr_Multiplication<<<gridSize,blockSize>>>(d_single_item_s_candidate_sum,d_max_n,Gpu_Db.c_item_len);
+    Arr_Multiplication<<<gridSize,blockSize>>>(d_single_item_i_candidate_sum,d_max_n,Gpu_Db.c_item_len);
+    cudaDeviceSynchronize();
+
+    cudaMemcpy(h_sums, d_single_item_i_candidate_sum, Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
+
+    for(int i=0;i<Gpu_Db.c_item_len;i++){
+        cout<<h_sums[i]<<" ";
+    }
+    cout<<endl;
 
     ///算single item 的peu、utility
 
@@ -1644,6 +1776,13 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test){
 
 
 int main() {
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, 0);
+    printf("Max Threads per Block: %d\n", prop.maxThreadsPerBlock);
+    printf("Max Blocks per Grid: %d x %d x %d\n", prop.maxGridSize[0], prop.maxGridSize[1], prop.maxGridSize[2]);
+    printf("Max Threads per SM: %d\n", prop.maxThreadsPerMultiProcessor);
+    printf("Number of SMs: %d\n", prop.multiProcessorCount);
+
     auto start = std::chrono::high_resolution_clock::now();
 
     // 指定要讀取的檔案名稱
@@ -1700,6 +1839,8 @@ int main() {
     // 計算持續時間，並轉換為毫秒
     std::chrono::duration<double> duration = end - start;
     std::cout << "Execution time: " << duration.count() << " seconds" << std::endl;
+
+
 
 
     return 0;
