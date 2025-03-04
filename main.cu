@@ -488,24 +488,60 @@ __global__ void count_chain_memory_size(int *d_sequence_len,
     }
 
 }
-__global__ void reduce_max(int *input, int *output, int n) {
-    __shared__ int shared_data[max_num_threads];
 
+// 這個 Kernel 用於在每個 Block 內做一次平行歸約，
+// 將該 Block 內的最大值寫到 blockResults[blockIdx.x].
+__global__ void reduceMaxKernel(const int* __restrict__ d_in,
+                                int* __restrict__ d_out,
+                                int n)
+{
+    // 每個 Block 負責一段資料 (blockSize * 2) 個元素, 以減少 kernel 呼叫次數
+
+    extern __shared__ int sdata[];  // 動態配置的 Shared memory
     int tid = threadIdx.x;
-    int global_tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int globalIdx = blockIdx.x * (blockDim.x * 2) + threadIdx.x;
 
-    shared_data[tid] = (global_tid < n) ? input[global_tid] : INT_MIN;
+    // 將 global memory 的資料讀進 shared memory
+    int myVal = (globalIdx < n) ? d_in[globalIdx] : INT_MIN;
+
+    // 若仍有空間，再多取一次(做 unrolling)
+    int secondIdx = globalIdx + blockDim.x;
+    if(secondIdx < n) {
+        int val2 = d_in[secondIdx];
+        if(val2 > myVal) {
+            myVal = val2;
+        }
+    }
+    sdata[tid] = myVal;
     __syncthreads();
 
-    for (int stride = blockDim.x / 2; stride > 0; stride /= 2) {
-        if (tid < stride) {
-            shared_data[tid] = max(shared_data[tid], shared_data[tid + stride]);
+    // 在 shared memory 做平行歸約 (reduce to max)
+    // 這裡的程式參考了 CUDA SDK 內的 reduction 範例
+    // 每次迭代讓活躍的 thread 數減半
+    for(int stride = blockDim.x / 2; stride > 32; stride >>= 1) {
+        if(tid < stride) {
+            if(sdata[tid + stride] > sdata[tid]) {
+                sdata[tid] = sdata[tid + stride];
+            }
         }
         __syncthreads();
     }
 
-    if (tid == 0) {
-        output[blockIdx.x] = shared_data[0];
+    // 最後 32 個 thread 繼續使用 unrolled warp
+    // (此時不再需要 __syncthreads() 因為同一 warp 中可保證同步)
+    if(tid < 32) {
+        // 依序消去 stride=32, 16, 8, 4, 2, 1
+        if(tid + 32 < blockDim.x && sdata[tid + 32] > sdata[tid])  sdata[tid] = sdata[tid + 32];
+        if(tid + 16 < blockDim.x && sdata[tid + 16] > sdata[tid])  sdata[tid] = sdata[tid + 16];
+        if(tid + 8 < blockDim.x && sdata[tid +  8] > sdata[tid])  sdata[tid] = sdata[tid +  8];
+        if(tid + 4 < blockDim.x && sdata[tid +  4] > sdata[tid])  sdata[tid] = sdata[tid +  4];
+        if(tid + 2 < blockDim.x && sdata[tid +  2] > sdata[tid])  sdata[tid] = sdata[tid +  2];
+        if(tid + 1 < blockDim.x && sdata[tid +  1] > sdata[tid])  sdata[tid] = sdata[tid +  1];
+    }
+
+    // 用 block 內的第 0 個 thread 將結果寫到 global memory
+    if(tid == 0) {
+        d_out[blockIdx.x] = sdata[0];
     }
 }
 
@@ -591,9 +627,9 @@ __global__ void count_single_item_s_candidate(int total_item_num,
 
 
     int project_item = d_sid_map_item[blockIdx.x];
-    int f_sid = blockIdx.x-d_sid_accumulate[blockIdx.x];
+    int chain_sid = blockIdx.x-d_sid_accumulate[blockIdx.x];
 
-    int sid = d_flat_chain_sid[d_chain_sid_offsets[project_item] + f_sid];
+    int sid = d_flat_chain_sid[d_chain_sid_offsets[project_item] + chain_sid];
 
     int sid_item_num = d_table_item_len[sid];//這個sid有多少種item
 
@@ -650,16 +686,43 @@ __global__ void count_single_item_i_candidate(int total_item_num,
                                               int *d_item,
                                               int *d_tid,
                                               int *d_db_offsets,
+                                              int *d_sequence_len,
                                               int *d_c_sid_len,
+                                              int *d_flat_c_seq_len,int *d_c_seq_len_offsets,
                                               int *d_flat_single_item_chain,int *d_chain_offsets_level1,int *d_chain_offsets_level2,
                                               int *d_flat_chain_sid,int *d_chain_sid_offsets,
-                                              int *d_table_item_len,
-                                              int *d_flat_indices_table,int *d_table_offsets_level1,int *d_table_offsets_level2,
-                                              int *d_flat_table_item,int *d_table_item_offsets,
-                                              int *d_single_item_s_candidate
+                                              int *d_single_item_i_candidate
 ){
-    
+    //blockIdx.x = 0～single item chain總共有多少sid
+    //threadIdx.x ＝ 0～1024 代表chain中sid上的投影點
 
+    int project_item = d_sid_map_item[blockIdx.x];
+    int chain_sid = blockIdx.x-d_sid_accumulate[blockIdx.x];
+
+    int sid = d_flat_chain_sid[d_chain_sid_offsets[project_item] + chain_sid];
+
+    int project_len = d_flat_c_seq_len[d_c_seq_len_offsets[project_item]+chain_sid];
+
+//    if(threadIdx.x == 0){
+//        printf("project_item=%d chain_sid=%d project_len=%d\n",project_item,chain_sid,project_len);
+//    }
+    int project_position,project_position_tid,next_position,next_position_tid;
+    for (int i = threadIdx.x; i < project_len; i += blockDim.x) {
+        project_position = d_flat_single_item_chain[d_chain_offsets_level2[d_chain_offsets_level1[project_item]+chain_sid]+i];
+        project_position_tid=d_tid[d_db_offsets[sid]+project_position];
+        next_position = project_position+1;
+        while(next_position<d_sequence_len[sid]){
+            next_position_tid = d_tid[d_db_offsets[sid]+next_position];
+            if(project_position_tid==next_position_tid){
+                //printf("sid=%d project_item=%d project_position=%d project_position_tid=%d i_item=%d i_position=%d i_tid=%d\n",sid,project_item,project_position,project_position_tid,d_item[d_db_offsets[sid]+next_position],next_position,next_position_tid);
+                atomicOr(&d_single_item_i_candidate[project_item * total_item_num+d_item[d_db_offsets[sid]+next_position]],1);
+            }else{
+                break;
+            }
+            next_position++;
+        }
+
+    }
 
 }
 
@@ -670,7 +733,7 @@ __global__ void Deep1_Peu_count(){
 void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test){
 
     //###################
-    //project DB初始
+    ///project DB初始
     //###################
 
     vector<int> flat_item, flat_tid, flat_iu, flat_ru;
@@ -687,6 +750,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test){
         }
         offset += Gpu_Db.sequence_len[i];
     }
+    db_offsets.push_back(offset);
 
     int *d_item, *d_tid, *d_iu, *d_ru;
     int *d_db_offsets;//offsets裡面存陣列偏移量 從0開始
@@ -938,8 +1002,8 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test){
 
 
     //###################
-    //計算chain空間
-    //算DFS所需要的最大空間（用最壞情況估 a,a,a,a...）
+    ///計算chain空間
+    ///算DFS所需要的最大空間（用最壞情況估 a,a,a,a...）
     //###################
 
     int *d_item_memory_overall_size;
@@ -966,26 +1030,57 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test){
     cudaDeviceSynchronize();
 
 
+//    int *h_test = new int[Gpu_Db.c_item_len];
+//    cudaMemcpy(h_test, d_item_memory_overall_size, Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
+//
+//    for(int i=0;i<Gpu_Db.c_item_len;i++){
+//        cout<<h_test[i]<<" ";
+//    }
+//    cout<<"\n";
 
-    int num_blocks = (Gpu_Db.c_item_len + max_num_threads-1) / max_num_threads;
-    int *d_item_memory_max;
-    cudaMalloc(&d_item_memory_max, num_blocks * sizeof(int));
+    //找d_item_memory_overall_size的max值
+    int *d_blockResults;///接收第一次reduce資料，之後可以重用
+    cudaMalloc(&d_blockResults, sizeof(int) * Gpu_Db.c_item_len);
 
-    //這裡也許可以用多段reduce加速
-    reduce_max<<<num_blocks,max_num_threads>>>(d_item_memory_overall_size,d_item_memory_max,Gpu_Db.c_item_len);
+    // ===== 第一次呼叫 =====
+    // - blockSize 選擇 <= max_num_threads
+    // - 每個 block 負責 2*blockSize 個元素
+    // => blocksPerGrid = (n + blockSize*2 - 1) / (blockSize*2)
+    int blockSize = (Gpu_Db.c_item_len < max_num_threads) ? Gpu_Db.c_item_len : max_num_threads;
+    int blocksPerGrid = (Gpu_Db.c_item_len + blockSize * 2 - 1) / (blockSize * 2);
 
-    int *h_item_memory_max = new int[num_blocks];
-    cudaMemcpy(h_item_memory_max, d_item_memory_max, num_blocks * sizeof(int), cudaMemcpyDeviceToHost);
+    // 呼叫 Kernel
+    reduceMaxKernel<<<blocksPerGrid, blockSize, blockSize * sizeof(int)>>>(
+            d_item_memory_overall_size,
+            d_blockResults,
+            Gpu_Db.c_item_len
+    );
+    cudaDeviceSynchronize();
 
-    int tree_node_chain_max_memory=0;
-    for(int i=0;i<num_blocks;i++){
-        if(tree_node_chain_max_memory<h_item_memory_max[i]){
-            tree_node_chain_max_memory=h_item_memory_max[i];
-        }
-        //cout<<h_item_memory_max[i]<<endl;
+    // 現在 blockResults 裏面有 blocksPerGrid 個 block 的最大值
+    // 若 blocksPerGrid > 1，還需要繼續歸約
+    int curSize = blocksPerGrid;
+    while(curSize > 1) {
+        int newBlockSize = (curSize < max_num_threads) ? curSize : max_num_threads;
+        int newBlocksPerGrid = (curSize + newBlockSize * 2 - 1) / (newBlockSize * 2);
+
+        reduceMaxKernel<<<newBlocksPerGrid, newBlockSize, newBlockSize * sizeof(int)>>>(
+                d_blockResults,  // 輸入放這裡
+                d_blockResults,  // 輸出也放這裡 (in-place)
+                curSize
+        );
+        cudaDeviceSynchronize();
+
+        curSize = newBlocksPerGrid;
     }
 
-    cout<<"tree_node_chain_max_memory:"<<tree_node_chain_max_memory<<endl;
+    // 此時 d_blockResults[0] 就是整個陣列的最大值
+    int tree_node_chain_max_memory;
+    cudaMemcpy(&tree_node_chain_max_memory, d_blockResults, sizeof(int), cudaMemcpyDeviceToHost);
+
+    std::cout << "tree_node_chain_max_memory:" << tree_node_chain_max_memory << std::endl;
+
+
 
 
     //###################
@@ -1019,20 +1114,52 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test){
     );
     cudaDeviceSynchronize();
 
-    //重用num_blocks d_item_memory_max
-    reduce_max<<<num_blocks,max_num_threads>>>(d_item_memory_overall_size,d_item_memory_max,Gpu_Db.c_item_len);
-    //重用h_item_memory_max
-    cudaMemcpy(h_item_memory_max, d_item_memory_max, num_blocks * sizeof(int), cudaMemcpyDeviceToHost);
+//    int *h_test = new int[Gpu_Db.c_item_len];
+//    cudaMemcpy(h_test, d_item_memory_overall_size, Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
+//
+//    for(int i=0;i<Gpu_Db.c_item_len;i++){
+//        cout<<h_test[i]<<" ";
+//    }
+//    cout<<"\n";
 
-    int tree_node_chain_offset_max_memory=0;
-    for(int i=0;i<num_blocks;i++){
-        if(tree_node_chain_offset_max_memory<h_item_memory_max[i]){
-            tree_node_chain_offset_max_memory=h_item_memory_max[i];
-        }
-        //tree_node_chain_offset_max_memory = (h_item_memory_max[i]>tree_node_chain_offset_max_memory)?h_item_memory_max[i]:tree_node_chain_offset_max_memory;
+    // ===== 第一次呼叫 =====
+    // - blockSize 選擇 <= max_num_threads
+    // - 每個 block 負責 2*blockSize 個元素
+    // => blocksPerGrid = (n + blockSize*2 - 1) / (blockSize*2)
+    blockSize = (Gpu_Db.c_item_len < max_num_threads) ? Gpu_Db.c_item_len : max_num_threads;
+    blocksPerGrid = (Gpu_Db.c_item_len + blockSize * 2 - 1) / (blockSize * 2);
+
+    // 呼叫 Kernel
+    reduceMaxKernel<<<blocksPerGrid, blockSize, blockSize * sizeof(int)>>>(
+            d_item_memory_overall_size,
+            d_blockResults,
+            Gpu_Db.c_item_len
+    );
+    cudaDeviceSynchronize();
+
+    // 現在 blockResults 裏面有 blocksPerGrid 個 block 的最大值
+    // 若 blocksPerGrid > 1，還需要繼續歸約
+    curSize = blocksPerGrid;
+    while(curSize > 1) {
+        int newBlockSize = (curSize < max_num_threads) ? curSize : max_num_threads;
+        int newBlocksPerGrid = (curSize + newBlockSize * 2 - 1) / (newBlockSize * 2);
+
+        reduceMaxKernel<<<newBlocksPerGrid, newBlockSize, newBlockSize * sizeof(int)>>>(
+                d_blockResults,  // 輸入放這裡
+                d_blockResults,  // 輸出也放這裡 (in-place)
+                curSize
+        );
+        cudaDeviceSynchronize();
+
+        curSize = newBlocksPerGrid;
     }
 
+    // 此時 d_blockResults[0] 就是整個陣列的最大值
+    int tree_node_chain_offset_max_memory;
+    cudaMemcpy(&tree_node_chain_offset_max_memory, d_blockResults, sizeof(int), cudaMemcpyDeviceToHost);
     cout<<"tree_node_chain_offset_max_memory:"<<tree_node_chain_offset_max_memory<<endl;
+
+
 
     //###################
     //建樹上節點的chain的offset和chain_sid(真正的sid)空間
@@ -1114,15 +1241,26 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test){
                                                            d_item,
                                                            d_tid,
                                                            d_db_offsets,
+                                                           d_sequence_len,
                                                            d_c_sid_len,
+                                                           d_flat_c_seq_len,d_c_seq_len_offsets,
                                                            d_flat_single_item_chain,d_chain_offsets_level1,d_chain_offsets_level2,
                                                            d_flat_chain_sid,d_chain_sid_offsets,
-                                                           d_table_item_len,
-                                                           d_flat_indices_table,d_table_offsets_level1,d_table_offsets_level2,
-                                                           d_flat_table_item,d_table_item_offsets,
-                                                           d_single_item_s_candidate
+                                                           d_single_item_i_candidate
     );
     cudaDeviceSynchronize();
+
+//    int *h_test = new int[Gpu_Db.c_item_len* Gpu_Db.c_item_len];
+//    cudaMemcpy(h_test, d_single_item_i_candidate, Gpu_Db.c_item_len* Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
+//
+//    for(int i=0;i<Gpu_Db.c_item_len;i++){
+//        cout<<i<<" : ";
+//        for(int j=0;j<Gpu_Db.c_item_len;j++){
+//            cout<<h_test[i*Gpu_Db.c_item_len+j]<<" ";
+//        }
+//        cout<<endl;
+//    }
+
 
 
     ///算single item 的peu、utility
