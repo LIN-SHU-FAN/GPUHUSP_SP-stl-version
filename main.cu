@@ -9,6 +9,7 @@
 #include <map>
 #include <stack>
 #include <chrono>
+#include <algorithm>
 
 #include <thrust/device_vector.h>
 #include <thrust/extrema.h>
@@ -62,6 +63,7 @@ public:
     int *c_sid_len;//長度是c_item_len
     int max_c_sid_len;//哪個item出現在sid中最多次
     int **c_seq_len;//長度是c_item_len 寬度是c_sid_len
+    //int max_c_seq_len;//
     vector<int> max_c_seq_len;//每個item的最大instance
 
 
@@ -781,16 +783,29 @@ __global__ void reduceSum2Dkernel(const int* __restrict__ d_data,  // [n*n] 大�
     }
 }
 //A和B點對點相乘後結果放到A
-__global__ void Arr_Multiplication(int *A,int *B,int n)
+__global__ void Arr_Multiplication(int * __restrict__ A,int * __restrict__ B,int n)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if(idx<n){
         A[idx] = A[idx] * B[idx];
     }
 }
-__global__ void Deep1_Peu_count(){
+
+
+__global__ void single_item_peu_count_max(int total_item_num,
+                                          int * __restrict__ d_sid_map_item,
+                                          int * __restrict__ d_sid_accumulate,
+                                          int * __restrict__ d_iu,
+                                          int * __restrict__ d_ru,
+                                          int * __restrict__ d_db_offsets,
+                                          int * __restrict__ d_flat_single_item_chain,int * __restrict__ d_chain_offsets_level1,int * __restrict__ d_chain_offsets_level2,
+                                          int * __restrict__ d_flat_c_seq_len,int * __restrict__ d_c_seq_len_offsets,
+                                          int * __restrict__ d_chain_sid_num_utility,
+                                          int * __restrict__ d_chain_sid_num_peu
+                                          ){
 
 }
+
 
 void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test){
 
@@ -991,6 +1006,8 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test){
 
     int count_table_item_len;
 
+    int max_table_item_len=0;//s擴展要用來算blocksize
+
     for(auto i=Gpu_Db.indices_table.begin();i!=Gpu_Db.indices_table.end();i++){
         count_table_item_len = 0;
 
@@ -1020,7 +1037,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test){
         }
         table_offsets_level1.push_back(int(table_offsets_level2.size()));
 
-
+        max_table_item_len = count_table_item_len>max_table_item_len?count_table_item_len:max_table_item_len;
         table_item_len.push_back(count_table_item_len);
 
     }
@@ -1266,8 +1283,10 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test){
     cudaMalloc(&d_sid_accumulate, sid_accumulate.size() * sizeof(int));
     cudaMemcpy(d_sid_accumulate, sid_accumulate.data(), sid_accumulate.size() * sizeof(int), cudaMemcpyHostToDevice);
 
+    int block_size=max_num_threads>max_table_item_len?max_table_item_len:max_num_threads;
 
-    count_single_item_s_candidate<<<sid_num,max_num_threads>>>(Gpu_Db.c_item_len,
+
+    count_single_item_s_candidate<<<sid_num,block_size>>>(Gpu_Db.c_item_len,
                                                            d_sid_map_item,
                                                            d_sid_accumulate,
                                                            d_tid,
@@ -1291,8 +1310,11 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test){
 //        }
 //        cout<<endl;
 //    }
+    auto max_it = std::max_element(Gpu_Db.max_c_seq_len.begin(), Gpu_Db.max_c_seq_len.end());
 
-    count_single_item_i_candidate<<<sid_num,max_num_threads>>>(Gpu_Db.c_item_len,
+    block_size=max_num_threads>*max_it?*max_it:max_num_threads;
+    
+    count_single_item_i_candidate<<<sid_num,block_size>>>(Gpu_Db.c_item_len,
                                                            d_sid_map_item,
                                                            d_sid_accumulate,
                                                            d_item,
@@ -1357,30 +1379,30 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test){
 
 
 
-    int *h_sums= new int[Gpu_Db.c_item_len];
-    cudaMemcpy(h_sums, d_single_item_s_candidate_sum, Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
-
-    cout<<"d_single_item_s_candidate_sum:";
-    for(int i=0;i<Gpu_Db.c_item_len;i++){
-        cout<<h_sums[i]<<" ";
-    }
-    cout<<endl;
-
-    cudaMemcpy(h_sums, d_single_item_i_candidate_sum, Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
-
-    cout<<"d_single_item_i_candidate_sum:";
-    for(int i=0;i<Gpu_Db.c_item_len;i++){
-        cout<<h_sums[i]<<" ";
-    }
-    cout<<endl;
-
-    cudaMemcpy(h_sums, d_max_n, Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
-
-    cout<<"d_max_n:";
-    for(int i=0;i<Gpu_Db.c_item_len;i++){
-        cout<<h_sums[i]<<" ";
-    }
-    cout<<endl;
+//    int *h_sums= new int[Gpu_Db.c_item_len];
+//    cudaMemcpy(h_sums, d_single_item_s_candidate_sum, Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
+//
+//    cout<<"d_single_item_s_candidate_sum:";
+//    for(int i=0;i<Gpu_Db.c_item_len;i++){
+//        cout<<h_sums[i]<<" ";
+//    }
+//    cout<<endl;
+//
+//    cudaMemcpy(h_sums, d_single_item_i_candidate_sum, Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
+//
+//    cout<<"d_single_item_i_candidate_sum:";
+//    for(int i=0;i<Gpu_Db.c_item_len;i++){
+//        cout<<h_sums[i]<<" ";
+//    }
+//    cout<<endl;
+//
+//    cudaMemcpy(h_sums, d_max_n, Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
+//
+//    cout<<"d_max_n:";
+//    for(int i=0;i<Gpu_Db.c_item_len;i++){
+//        cout<<h_sums[i]<<" ";
+//    }
+//    cout<<endl;
 
     blockSize = (Gpu_Db.c_item_len < max_num_threads) ? Gpu_Db.c_item_len : max_num_threads;
     gridSize = (Gpu_Db.c_item_len + (blockSize - 1))/blockSize;
@@ -1388,18 +1410,111 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test){
     Arr_Multiplication<<<gridSize,blockSize>>>(d_single_item_i_candidate_sum,d_max_n,Gpu_Db.c_item_len);
     cudaDeviceSynchronize();
 
-    cudaMemcpy(h_sums, d_single_item_i_candidate_sum, Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
+//    cudaMemcpy(h_sums, d_single_item_s_candidate_sum, Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
+//
+//    for(int i=0;i<Gpu_Db.c_item_len;i++){
+//        cout<<h_sums[i]<<" ";
+//    }
+//    cout<<endl;
+//
+//    cudaMemcpy(h_sums, d_single_item_i_candidate_sum, Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
+//
+//    for(int i=0;i<Gpu_Db.c_item_len;i++){
+//        cout<<h_sums[i]<<" ";
+//    }
+//    cout<<endl;
 
-    for(int i=0;i<Gpu_Db.c_item_len;i++){
-        cout<<h_sums[i]<<" ";
+
+    // ===== 第一次呼叫 =====
+    // - blockSize 選擇 <= max_num_threads
+    // - 每個 block 負責 2*blockSize 個元素
+    // => blocksPerGrid = (n + blockSize*2 - 1) / (blockSize*2)
+    blockSize = (Gpu_Db.c_item_len < max_num_threads) ? Gpu_Db.c_item_len : max_num_threads;
+    blocksPerGrid = (Gpu_Db.c_item_len + blockSize * 2 - 1) / (blockSize * 2);
+
+    int *d_s_candidate_blockResults;
+    cudaMalloc(&d_s_candidate_blockResults, sizeof(int) * Gpu_Db.c_item_len);
+
+    int *d_i_candidate_blockResults;
+    cudaMalloc(&d_i_candidate_blockResults, sizeof(int) * Gpu_Db.c_item_len);
+
+    // 呼叫 Kernel
+    reduceMaxKernel<<<blocksPerGrid, blockSize, blockSize * sizeof(int)>>>(
+            d_single_item_s_candidate_sum,
+            d_s_candidate_blockResults,
+            Gpu_Db.c_item_len
+    );
+    reduceMaxKernel<<<blocksPerGrid, blockSize, blockSize * sizeof(int)>>>(
+            d_single_item_i_candidate_sum,
+            d_i_candidate_blockResults,
+            Gpu_Db.c_item_len
+    );
+    cudaDeviceSynchronize();
+
+    // 現在 blockResults 裏面有 blocksPerGrid 個 block 的最大值
+    // 若 blocksPerGrid > 1，還需要繼續歸約
+    curSize = blocksPerGrid;
+    while(curSize > 1) {
+        int newBlockSize = (curSize < max_num_threads) ? curSize : max_num_threads;
+        int newBlocksPerGrid = (curSize + newBlockSize * 2 - 1) / (newBlockSize * 2);
+
+        reduceMaxKernel<<<newBlocksPerGrid, newBlockSize, newBlockSize * sizeof(int)>>>(
+                d_s_candidate_blockResults,  // 輸入放這裡
+                d_s_candidate_blockResults,  // 輸出也放這裡 (in-place)
+                curSize
+        );
+
+        reduceMaxKernel<<<newBlocksPerGrid, newBlockSize, newBlockSize * sizeof(int)>>>(
+                d_i_candidate_blockResults,  // 輸入放這裡
+                d_i_candidate_blockResults,  // 輸出也放這裡 (in-place)
+                curSize
+        );
+        cudaDeviceSynchronize();
+
+        curSize = newBlocksPerGrid;
     }
-    cout<<endl;
+
+    // 此時 d_s_candidate_blockResults[0] 就是整個陣列的最大值
+    int single_item_s_candidate_max_memory;
+    cudaMemcpy(&single_item_s_candidate_max_memory, d_s_candidate_blockResults, sizeof(int), cudaMemcpyDeviceToHost);
+    cout<<"single_item_s_candidate_max_memory:"<<single_item_s_candidate_max_memory<<endl;
+
+    // 此時 d_i_candidate_blockResults[0] 就是整個陣列的最大值
+    int single_item_i_candidate_max_memory;
+    cudaMemcpy(&single_item_i_candidate_max_memory, d_i_candidate_blockResults, sizeof(int), cudaMemcpyDeviceToHost);
+    cout<<"single_item_i_candidate_max_memory:"<<single_item_i_candidate_max_memory<<endl;
+
 
     ///算single item 的peu、utility
 
     int chain_sid_num = chain_offsets_level1.at(chain_offsets_level1.size()-1);//single item chain中總共的sid數量
 
     int *d_chain_sid_num_utility,*d_chain_sid_num_peu;
+
+    cudaMalloc(&d_chain_sid_num_utility, chain_sid_num * sizeof(int));
+    cudaMalloc(&d_chain_sid_num_peu, chain_sid_num * sizeof(int));
+
+    max_it = std::max_element(Gpu_Db.max_c_seq_len.begin(), Gpu_Db.max_c_seq_len.end());
+    block_size=max_num_threads>*max_it?*max_it:max_num_threads;
+
+    single_item_peu_count_max<<<chain_sid_num,block_size>>>(Gpu_Db.c_item_len,
+                                                            d_sid_map_item,
+                                                            d_sid_accumulate,
+                                                            d_iu,
+                                                            d_ru,
+                                                            d_db_offsets,
+                                                            d_flat_single_item_chain,d_chain_offsets_level1,d_chain_offsets_level2,
+                                                            d_flat_c_seq_len,d_c_seq_len_offsets,
+                                                            d_chain_sid_num_utility,
+                                                            d_chain_sid_num_peu
+                                                            );
+    cudaDeviceSynchronize();
+
+
+
+
+
+
 
 
 
@@ -1782,6 +1897,7 @@ int main() {
     printf("Max Blocks per Grid: %d x %d x %d\n", prop.maxGridSize[0], prop.maxGridSize[1], prop.maxGridSize[2]);
     printf("Max Threads per SM: %d\n", prop.maxThreadsPerMultiProcessor);
     printf("Number of SMs: %d\n", prop.multiProcessorCount);
+
 
     auto start = std::chrono::high_resolution_clock::now();
 
