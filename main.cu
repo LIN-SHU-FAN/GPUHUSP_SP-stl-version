@@ -1665,27 +1665,29 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
     );
     cudaDeviceSynchronize();
 
-//    int *h_test = new int[Gpu_Db.c_item_len* Gpu_Db.c_item_len];
-//    cudaMemcpy(h_test, d_single_item_s_candidate, Gpu_Db.c_item_len* Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
-//
-//    for(int i=0;i<Gpu_Db.c_item_len;i++){
-//        cout<<i<<" : ";
-//        for(int j=0;j<Gpu_Db.c_item_len;j++){
-//            cout<<h_test[i*Gpu_Db.c_item_len+j]<<" ";
-//        }
-//        cout<<endl;
-//    }
-//
-//    cudaMemcpy(h_test, d_single_item_i_candidate, Gpu_Db.c_item_len* Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
-//
-//    for(int i=0;i<Gpu_Db.c_item_len;i++){
-//        cout<<i<<" : ";
-//        for(int j=0;j<Gpu_Db.c_item_len;j++){
-//            cout<<h_test[i*Gpu_Db.c_item_len+j]<<" ";
-//        }
-//        cout<<endl;
-//    }
+    int *h_test = new int[Gpu_Db.c_item_len* Gpu_Db.c_item_len];
+    cudaMemcpy(h_test, d_single_item_s_candidate, Gpu_Db.c_item_len* Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
 
+    for(int i=0;i<Gpu_Db.c_item_len;i++){
+        cout<<i<<" : ";
+        for(int j=0;j<Gpu_Db.c_item_len;j++){
+            cout<<h_test[i*Gpu_Db.c_item_len+j]<<" ";
+        }
+        cout<<endl;
+    }
+
+    cudaMemcpy(h_test, d_single_item_i_candidate, Gpu_Db.c_item_len* Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
+
+    for(int i=0;i<Gpu_Db.c_item_len;i++){
+        cout<<i<<" : ";
+        for(int j=0;j<Gpu_Db.c_item_len;j++){
+            cout<<h_test[i*Gpu_Db.c_item_len+j]<<" ";
+        }
+        cout<<endl;
+    }
+
+
+    ///計算空間大小
 
     // ---------------------------
     // 啟動 kernel 做 parallel reduction
