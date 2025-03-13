@@ -695,14 +695,24 @@ __global__ void count_single_item_s_candidate(int total_item_num,
                 //printf("sid=%d item=%d i=%d s_item=%d item_tid=%d s_candidate=%d sid_item_num=%d\n",sid,project_item,i,)
                 //printf("sid=%d item=%d i=%d s_item=%d item_tid=%d s_candidate=%d sid_item_num=%d\n",sid,project_item,i,d_item[d_db_offsets[sid]+i],d_tid[d_db_offsets[sid]+item_fist_project_position],d_tid[d_db_offsets[sid]+table_item_last_project_position],sid_item_num);
                 atomicOr(&d_single_item_s_candidate[project_item*total_item_num+d_flat_table_item[d_table_item_offsets[sid]+i]],1);
-                
-                
+
+
                 ///算TSU
                 if(d_TSU_bool[blockIdx.x]){//=true代表要用pattern(這裡是single item)的utility+(第一個可擴展的candidate item的iu+ru)
-                    
+                    int instance_idx = 0;
+                    int while_project_position =d_flat_indices_table[d_table_offsets_level2[d_table_offsets_level1[sid]+i]+instance_idx];
+                    //while_project_position代表candidate在DB上sid中的投影點
+                    //找到>item_fist_project_position的投影點就是第一個可擴展的candidate item
+
+                    //能進來到這裡代表一定有可以投影的投影點，所以不用設邊界
+                    while(while_project_position<=item_fist_project_position){
+                        instance_idx++;
+                        while_project_position =d_flat_indices_table[d_table_offsets_level2[d_table_offsets_level1[sid]+i]+instance_idx];
+                    }
+
                     d_single_item_s_candidate_TSU[project_item*total_item_num+d_flat_table_item[d_table_item_offsets[sid]+i]]
-                            = d_chain_sid_num_utility[blockIdx.x]+0+0;
-                    
+                            = d_chain_sid_num_utility[blockIdx.x]+d_iu[d_db_offsets[sid]+while_project_position]+d_ru[d_db_offsets[sid]+while_project_position];
+
                 }else{//=false用peu
                     d_single_item_s_candidate_TSU[project_item*total_item_num+d_flat_table_item[d_table_item_offsets[sid]+i]]
                     = d_chain_sid_num_peu[blockIdx.x];
@@ -1499,7 +1509,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 
 
 
-    int chain_sid_num = chain_offsets_level1.at(chain_offsets_level1.size()-1);//single item chain中總共的sid數量 = sid_num 
+    int chain_sid_num = chain_offsets_level1.at(chain_offsets_level1.size()-1);//single item chain中總共的sid數量 = sid_num
 
     int *d_chain_sid_num_utility,*d_chain_sid_num_peu;
 
@@ -1709,7 +1719,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
         cout<<endl;
     }
 
-    cudaMemcpy(h_test, d_single_item_i_candidate, Gpu_Db.c_item_len* Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_test, d_single_item_s_candidate_TSU, Gpu_Db.c_item_len* Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
 
     for(int i=0;i<Gpu_Db.c_item_len;i++){
         cout<<i<<" : ";
@@ -1718,6 +1728,16 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
         }
         cout<<endl;
     }
+
+    cudaMemcpy(h_test, d_single_item_i_candidate, Gpu_Db.c_item_len* Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
+//
+//    for(int i=0;i<Gpu_Db.c_item_len;i++){
+//        cout<<i<<" : ";
+//        for(int j=0;j<Gpu_Db.c_item_len;j++){
+//            cout<<h_test[i*Gpu_Db.c_item_len+j]<<" ";
+//        }
+//        cout<<endl;
+//    }
 
 
     ///計算空間大小
