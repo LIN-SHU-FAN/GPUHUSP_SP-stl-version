@@ -709,13 +709,13 @@ __global__ void count_single_item_s_candidate(int total_item_num,
                         instance_idx++;
                         while_project_position =d_flat_indices_table[d_table_offsets_level2[d_table_offsets_level1[sid]+i]+instance_idx];
                     }
-
-                    d_single_item_s_candidate_TSU[project_item*total_item_num+d_flat_table_item[d_table_item_offsets[sid]+i]]
-                            = d_chain_sid_num_utility[blockIdx.x]+d_iu[d_db_offsets[sid]+while_project_position]+d_ru[d_db_offsets[sid]+while_project_position];
+                    atomicAdd(&d_single_item_s_candidate_TSU[project_item*total_item_num+d_flat_table_item[d_table_item_offsets[sid]+i]]
+                    ,d_chain_sid_num_utility[blockIdx.x]+d_iu[d_db_offsets[sid]+while_project_position]+d_ru[d_db_offsets[sid]+while_project_position]);
 
                 }else{//=false用peu
-                    d_single_item_s_candidate_TSU[project_item*total_item_num+d_flat_table_item[d_table_item_offsets[sid]+i]]
-                    = d_chain_sid_num_peu[blockIdx.x];
+                    atomicAdd(&d_single_item_s_candidate_TSU[project_item*total_item_num+d_flat_table_item[d_table_item_offsets[sid]+i]]
+                            ,d_chain_sid_num_peu[blockIdx.x]);
+
                 }
             }
         }
@@ -735,7 +735,13 @@ __global__ void count_single_item_i_candidate(int total_item_num,
                                               int * __restrict__ d_flat_c_seq_len,int * __restrict__ d_c_seq_len_offsets,
                                               int *__restrict__ d_flat_single_item_chain,int * __restrict__ d_chain_offsets_level1,int * __restrict__ d_chain_offsets_level2,
                                               int *__restrict__ d_flat_chain_sid,int *__restrict__ d_chain_sid_offsets,
-                                              int *__restrict__ d_single_item_i_candidate
+                                              int *__restrict__ d_single_item_i_candidate,
+                                              int *__restrict__ d_chain_sid_num_utility,
+                                              int *__restrict__ d_chain_sid_num_peu,
+                                              bool *__restrict__ d_TSU_bool,
+                                              int *__restrict__ d_iu,
+                                              int *__restrict__ d_ru,
+                                              int *__restrict__ d_single_item_i_candidate_TSU_chain_sid_num
 ){
     //blockIdx.x = 0～single item chain總共有多少sid
     //threadIdx.x ＝ 0～1024 代表chain中sid上的投影點
@@ -760,6 +766,18 @@ __global__ void count_single_item_i_candidate(int total_item_num,
             if(project_position_tid==next_position_tid){
                 //printf("sid=%d project_item=%d project_position=%d project_position_tid=%d i_item=%d i_position=%d i_tid=%d\n",sid,project_item,project_position,project_position_tid,d_item[d_db_offsets[sid]+next_position],next_position,next_position_tid);
                 atomicOr(&d_single_item_i_candidate[project_item * total_item_num+d_item[d_db_offsets[sid]+next_position]],1);
+
+                ///TSU
+                if(d_TSU_bool[blockIdx.x]){
+                    atomicMax(&d_single_item_i_candidate_TSU_chain_sid_num[blockIdx.x * total_item_num+d_item[d_db_offsets[sid]+next_position]],
+                              d_chain_sid_num_utility[blockIdx.x]+d_iu[d_db_offsets[sid]+next_position]+d_ru[d_db_offsets[sid]+next_position]);
+//                    d_single_item_i_candidate_TSU[project_item * total_item_num+d_item[d_db_offsets[sid]+next_position]]
+//                    = atomicMax(&d_maxVal, arr[idx]);
+                }else{
+                    d_single_item_i_candidate_TSU_chain_sid_num[blockIdx.x * total_item_num+d_item[d_db_offsets[sid]+next_position]]
+                    = d_chain_sid_num_peu[blockIdx.x];
+
+                }
             }else{
                 break;
             }
@@ -1039,6 +1057,19 @@ __global__ void single_item_peu_utility_count(int * __restrict__ d_chain_sid_num
 
 
 void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HUSP_num){
+
+    size_t freeMem = 0;
+    size_t totalMem = 0;
+    //獲取 GPU 的內存信息
+    cudaError_t status = cudaMemGetInfo(&freeMem, &totalMem);
+    cout <<endl;
+    if (status == cudaSuccess) {
+        cout << "GPU 總內存: " << totalMem / (1024 * 1024) << " MB" << endl;
+        cout << "GPU 可用內存: " << freeMem / (1024 * 1024) << " MB" << endl;
+    } else {
+        cerr << "無法獲取內存信息，錯誤碼: " << cudaGetErrorString(status) << endl;
+    }
+    cout <<endl;
 
     //###################
     ///project DB初始
@@ -1486,7 +1517,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 
 
     //###################
-    ///算single item 的peu、utility
+    /// 計算single item 的peu、utility
     //###################
 
     vector<int> sid_map_item;//用來一對一對應sid屬於哪個item
@@ -1654,10 +1685,13 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
     cudaMalloc(&d_single_item_i_candidate_TSU, Gpu_Db.c_item_len* Gpu_Db.c_item_len * sizeof(int));
     cudaMemset(d_single_item_i_candidate_TSU, 0, Gpu_Db.c_item_len * Gpu_Db.c_item_len * sizeof(int));
 
+    int * d_single_item_i_candidate_TSU_chain_sid_num;//用chain_sid_num*n=>之後在聚合成d_single_item_i_candidate_TSU
+    cudaMalloc(&d_single_item_i_candidate_TSU_chain_sid_num, sid_num* Gpu_Db.c_item_len * sizeof(int));
+    cudaMemset(d_single_item_i_candidate_TSU_chain_sid_num, 0, sid_num * Gpu_Db.c_item_len * sizeof(int));
 
     block_size=max_num_threads>max_table_item_len?max_table_item_len:max_num_threads;
 
-
+    ///TSU有錯*** => TSU要開sid_num*n的大小才對 之後在聚合
     count_single_item_s_candidate<<<sid_num,block_size>>>(Gpu_Db.c_item_len,
                                                           d_sid_map_item,
                                                           d_sid_accumulate,
@@ -1704,32 +1738,18 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
                                                           d_flat_c_seq_len,d_c_seq_len_offsets,
                                                           d_flat_single_item_chain,d_chain_offsets_level1,d_chain_offsets_level2,
                                                           d_flat_chain_sid,d_chain_sid_offsets,
-                                                          d_single_item_i_candidate
+                                                          d_single_item_i_candidate,
+                                                          d_chain_sid_num_utility,
+                                                          d_chain_sid_num_peu,
+                                                          d_TSU_bool,
+                                                          d_iu,
+                                                          d_ru,
+                                                          d_single_item_i_candidate_TSU_chain_sid_num
     );
     cudaDeviceSynchronize();
 
     int *h_test = new int[Gpu_Db.c_item_len* Gpu_Db.c_item_len];
-    cudaMemcpy(h_test, d_single_item_s_candidate, Gpu_Db.c_item_len* Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
-
-    for(int i=0;i<Gpu_Db.c_item_len;i++){
-        cout<<i<<" : ";
-        for(int j=0;j<Gpu_Db.c_item_len;j++){
-            cout<<h_test[i*Gpu_Db.c_item_len+j]<<" ";
-        }
-        cout<<endl;
-    }
-
-    cudaMemcpy(h_test, d_single_item_s_candidate_TSU, Gpu_Db.c_item_len* Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
-
-    for(int i=0;i<Gpu_Db.c_item_len;i++){
-        cout<<i<<" : ";
-        for(int j=0;j<Gpu_Db.c_item_len;j++){
-            cout<<h_test[i*Gpu_Db.c_item_len+j]<<" ";
-        }
-        cout<<endl;
-    }
-
-    cudaMemcpy(h_test, d_single_item_i_candidate, Gpu_Db.c_item_len* Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
+//    cudaMemcpy(h_test, d_single_item_s_candidate, Gpu_Db.c_item_len* Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
 //
 //    for(int i=0;i<Gpu_Db.c_item_len;i++){
 //        cout<<i<<" : ";
@@ -1738,6 +1758,39 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 //        }
 //        cout<<endl;
 //    }
+//
+//    cudaMemcpy(h_test, d_single_item_s_candidate_TSU, Gpu_Db.c_item_len* Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
+//
+//    for(int i=0;i<Gpu_Db.c_item_len;i++){
+//        cout<<i<<" : ";
+//        for(int j=0;j<Gpu_Db.c_item_len;j++){
+//            cout<<h_test[i*Gpu_Db.c_item_len+j]<<" ";
+//        }
+//        cout<<endl;
+//    }
+
+    cudaMemcpy(h_test, d_single_item_i_candidate, Gpu_Db.c_item_len* Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
+
+    for(int i=0;i<Gpu_Db.c_item_len;i++){
+        cout<<i<<" : ";
+        for(int j=0;j<Gpu_Db.c_item_len;j++){
+            cout<<h_test[i*Gpu_Db.c_item_len+j]<<" ";
+        }
+        cout<<endl;
+    }
+
+    int *h_testt = new int[sid_num* Gpu_Db.c_item_len];
+    cudaMemcpy(h_testt, d_single_item_i_candidate_TSU_chain_sid_num, sid_num* Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
+
+    for(int i=0;i<sid_num;i++){
+        cout<<i<<" : ";
+        for(int j=0;j<Gpu_Db.c_item_len;j++){
+            cout<<h_testt[i*Gpu_Db.c_item_len+j]<<" ";
+        }
+        cout<<endl;
+    }
+
+
 
 
     ///計算空間大小
@@ -1888,11 +1941,47 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 
 
 
+    //獲取 GPU 的內存信息
+    status = cudaMemGetInfo(&freeMem, &totalMem);
+    cout <<endl;
+    if (status == cudaSuccess) {
+        cout << "GPU 總內存: " << totalMem / (1024 * 1024) << " MB" << endl;
+        cout << "GPU 可用內存: " << freeMem / (1024 * 1024) << " MB" << endl;
+    } else {
+        cerr << "無法獲取內存信息，錯誤碼: " << cudaGetErrorString(status) << endl;
+    }
+    cout <<endl;
 
 
+    ///DFS前將用不到的device空間刪除
+    cudaFree(d_item_memory_overall_size);
+    cudaFree(d_blockResults);
+    cudaFree(d_max_n);
+    cudaFree(d_sid_map_item);
+    cudaFree(d_sid_accumulate);
+    cudaFree(d_chain_sid_num_utility);
+    cudaFree(d_chain_sid_num_peu);
+    cudaFree(d_TSU_bool);
+    cudaFree(d_chain_single_item_utility);
+    cudaFree(d_chain_single_item_peu);
+    cudaFree(d_single_item_s_candidate_TSU);
+    cudaFree(d_single_item_i_candidate_TSU);
 
+    cudaFree(d_single_item_s_candidate_sum);
+    cudaFree(d_single_item_i_candidate_sum);
+    cudaFree(d_s_candidate_blockResults);
+    cudaFree(d_i_candidate_blockResults);
 
-
+    //獲取 GPU 的內存信息
+    status = cudaMemGetInfo(&freeMem, &totalMem);
+    cout <<endl;
+    if (status == cudaSuccess) {
+        cout << "GPU 總內存: " << totalMem / (1024 * 1024) << " MB" << endl;
+        cout << "GPU 可用內存: " << freeMem / (1024 * 1024) << " MB" << endl;
+    } else {
+        cerr << "無法獲取內存信息，錯誤碼: " << cudaGetErrorString(status) << endl;
+    }
+    cout <<endl;
 
     ///建構tree_node到DFS_stack中
 
@@ -1911,10 +2000,6 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
     }
 
 
-    //開始遞迴
-    for(int i=0;i<Gpu_Db.c_item_len;i++){
-
-    }
 
 
 
