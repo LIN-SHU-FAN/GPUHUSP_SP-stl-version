@@ -957,7 +957,7 @@ __global__ void single_item_peu_utility_count_max(int total_item_num,
 __global__ void single_item_peu_utility_count(int * __restrict__ d_chain_sid_num_peu,
                                               int * __restrict__ d_chain_sid_num_utility,
                                               int * __restrict__ d_c_seq_len_offsets,
-        //d_chain_sid_num_peu剛好可以用d_c_seq_len_offsets算index
+                                              //d_chain_sid_num_peu剛好可以用d_c_seq_len_offsets算index
                                               int * __restrict__ d_c_sid_len,
                                               int * __restrict__ d_chain_single_item_peu,
                                               int * __restrict__ d_chain_single_item_utility,
@@ -976,6 +976,10 @@ __global__ void single_item_peu_utility_count(int * __restrict__ d_chain_sid_num
 
 
     for(int i=tid;i<sid_len;i+=blockDim.x){
+//        if(blockIdx.x ==18){
+//            printf("d_chain_sid_num_utility=%d\n",d_chain_sid_num_utility[d_c_seq_len_offsets[blockIdx.x]+i]);
+//        }
+
         sum_utility += d_chain_sid_num_utility[d_c_seq_len_offsets[blockIdx.x]+i];
 
         sum_peu += d_chain_sid_num_peu[d_c_seq_len_offsets[blockIdx.x]+i];
@@ -1086,13 +1090,13 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
     int *d_db_offsets;//offsets裡面存陣列偏移量 從0開始
     int *d_sequence_len;
 
-    checkCudaError(cudaMalloc(&d_item, flat_item.size() * sizeof(int)), "cudaMalloc d_item");
-    checkCudaError(cudaMalloc(&d_tid, flat_tid.size() * sizeof(int)),   "cudaMalloc d_tid");
-    checkCudaError(cudaMalloc(&d_iu,  flat_iu.size() * sizeof(int)),    "cudaMalloc d_iu");
-    checkCudaError(cudaMalloc(&d_ru,  flat_ru.size() * sizeof(int)),    "cudaMalloc d_ru");
+    cudaMalloc(&d_item, flat_item.size() * sizeof(int));
+    cudaMalloc(&d_tid, flat_tid.size() * sizeof(int));
+    cudaMalloc(&d_iu,  flat_iu.size() * sizeof(int));
+    cudaMalloc(&d_ru,  flat_ru.size() * sizeof(int));
 
-    checkCudaError(cudaMalloc(&d_db_offsets, db_offsets.size() * sizeof(int)),  "cudaMalloc d_db_offsets");
-    checkCudaError(cudaMalloc(&d_sequence_len, Gpu_Db.sid_len * sizeof(int)),   "cudaMalloc d_sequence_len");
+    cudaMalloc(&d_db_offsets, db_offsets.size() * sizeof(int));
+    cudaMalloc(&d_sequence_len, Gpu_Db.sid_len * sizeof(int));
 
 
     cudaMemcpy(d_item, flat_item.data(), flat_item.size() * sizeof(int), cudaMemcpyHostToDevice);
@@ -1360,8 +1364,9 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
                                                                             d_c_sid_len,
                                                                             d_flat_single_item_chain,d_chain_offsets_level1,d_chain_offsets_level2,
                                                                             d_item_memory_overall_size);
-    cudaDeviceSynchronize();
 
+    checkCudaError(cudaPeekAtLastError(),    "count_chain_memory_size launch param");
+    checkCudaError(cudaDeviceSynchronize(),  "count_chain_memory_size execution");
 
 //    int *h_test = new int[Gpu_Db.c_item_len];
 //    cudaMemcpy(h_test, d_item_memory_overall_size, Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
@@ -1388,7 +1393,9 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
             d_blockResults,
             Gpu_Db.c_item_len
     );
-    cudaDeviceSynchronize();
+    checkCudaError(cudaPeekAtLastError(),    "reduceMaxKernel launch param");
+    checkCudaError(cudaDeviceSynchronize(),  "reduceMaxKernel execution");
+
 
     // 現在 blockResults 裏面有 blocksPerGrid 個 block 的最大值
     // 若 blocksPerGrid > 1，還需要繼續歸約
@@ -1402,7 +1409,8 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
                 d_blockResults,  // 輸出也放這裡 (in-place)
                 curSize
         );
-        cudaDeviceSynchronize();
+        checkCudaError(cudaPeekAtLastError(),    "reduceMaxKernel launch param");
+        checkCudaError(cudaDeviceSynchronize(),  "reduceMaxKernel execution");
 
         curSize = newBlocksPerGrid;
     }
@@ -1431,7 +1439,8 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
                                                                             d_item_memory_overall_size,
                                                                             d_max_n
     );
-    cudaDeviceSynchronize();
+    checkCudaError(cudaPeekAtLastError(),    "count_chain_offset_size launch param");
+    checkCudaError(cudaDeviceSynchronize(),  "count_chain_offset_size execution");
 
 //    int *h_test = new int[Gpu_Db.c_item_len];
 //    cudaMemcpy(h_test, d_item_memory_overall_size, Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
@@ -1454,7 +1463,8 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
             d_blockResults,
             Gpu_Db.c_item_len
     );
-    cudaDeviceSynchronize();
+    checkCudaError(cudaPeekAtLastError(),    "reduceMaxKernel launch param");
+    checkCudaError(cudaDeviceSynchronize(),  "reduceMaxKernel execution");
 
     // 現在 blockResults 裏面有 blocksPerGrid 個 block 的最大值
     // 若 blocksPerGrid > 1，還需要繼續歸約
@@ -1468,7 +1478,8 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
                 d_blockResults,  // 輸出也放這裡 (in-place)
                 curSize
         );
-        cudaDeviceSynchronize();
+        checkCudaError(cudaPeekAtLastError(),    "reduceMaxKernel launch param");
+        checkCudaError(cudaDeviceSynchronize(),  "reduceMaxKernel execution");
 
         curSize = newBlocksPerGrid;
     }
@@ -1532,7 +1543,8 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
                                                                     d_chain_sid_num_peu,
                                                                     d_TSU_bool
     );
-    cudaDeviceSynchronize();
+    checkCudaError(cudaPeekAtLastError(),    "single_item_peu_utility_count_max launch param");
+    checkCudaError(cudaDeviceSynchronize(),  "single_item_peu_utility_count_max execution");
 
 //    int *h_t= new int[chain_sid_num];
 //    cudaMemcpy(h_t, d_chain_sid_num_utility, chain_sid_num * sizeof(int), cudaMemcpyDeviceToHost);
@@ -1550,7 +1562,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 //        cout<<i<<":"<<h_t[i]<<" ";
 //    }
 //    cout<<endl;
-
+//
 //    bool *h_rt= new bool[chain_sid_num];
 //    cudaMemcpy(h_rt, d_TSU_bool, chain_sid_num * sizeof(bool), cudaMemcpyDeviceToHost);
 //
@@ -1568,13 +1580,14 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
     bool *d_chain_single_item_utility_bool,*d_chain_single_item_peu_bool;
 
     cudaMalloc(&d_chain_single_item_utility_bool, Gpu_Db.c_item_len * sizeof(bool));
-    cudaMemset(d_chain_single_item_utility_bool, 0, Gpu_Db.c_item_len * Gpu_Db.c_item_len * sizeof(bool));
+    cudaMemset(d_chain_single_item_utility_bool, 0,  Gpu_Db.c_item_len * sizeof(bool));
 
     cudaMalloc(&d_chain_single_item_peu_bool, Gpu_Db.c_item_len * sizeof(bool));
-    cudaMemset(d_chain_single_item_peu_bool, 0, Gpu_Db.c_item_len * Gpu_Db.c_item_len * sizeof(bool));
+    cudaMemset(d_chain_single_item_peu_bool, 0,  Gpu_Db.c_item_len * sizeof(bool));
 
 
     block_size=max_num_threads>Gpu_Db.max_c_sid_len?Gpu_Db.max_c_sid_len:max_num_threads;
+
 
     single_item_peu_utility_count<<<Gpu_Db.c_item_len,block_size>>>(d_chain_sid_num_peu,
                                                                     d_chain_sid_num_utility,
@@ -1586,7 +1599,12 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
                                                                     d_chain_single_item_utility_bool,
                                                                     d_chain_single_item_peu_bool
     );
-    cudaDeviceSynchronize();
+//    cudaError_t err = cudaDeviceSynchronize();
+//    if(err != cudaSuccess){
+//        printf("[CUDA Error]: %s\n", cudaGetErrorString(err));
+//    }
+    checkCudaError(cudaPeekAtLastError(),    "single_item_peu_utility_count launch param");
+    checkCudaError(cudaDeviceSynchronize(),  "single_item_peu_utility_count execution");
 
     //cout<<Gpu_Db.c_sid_len[18]<<endl;
 
@@ -1709,7 +1727,8 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
                                                           d_ru,
                                                           d_single_item_i_candidate_TSU_chain_sid_num
     );
-    cudaDeviceSynchronize();
+    checkCudaError(cudaPeekAtLastError(),    "count_single_item_i_candidate launch param");
+    checkCudaError(cudaDeviceSynchronize(),  "count_single_item_i_candidate execution");
 
     //int *h_test = new int[Gpu_Db.c_item_len* Gpu_Db.c_item_len];
 //    cudaMemcpy(h_test, d_single_item_s_candidate, Gpu_Db.c_item_len* Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
@@ -1762,7 +1781,8 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
                                                             Gpu_Db.c_item_len,
                                                             d_single_item_i_candidate_TSU
                                                         );
-    cudaDeviceSynchronize();
+    checkCudaError(cudaPeekAtLastError(),    "sum_i_candidate_TSU_chain_sid_num_Segments_LargeN launch param");
+    checkCudaError(cudaDeviceSynchronize(),  "sum_i_candidate_TSU_chain_sid_num_Segments_LargeN execution");
 
 //    cudaMemcpy(h_test, d_single_item_i_candidate_TSU, Gpu_Db.c_item_len* Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
 //
@@ -1782,7 +1802,8 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
                                                              d_single_item_i_candidate_TSU,
                                                              d_single_item_s_candidate,
                                                              d_single_item_s_candidate_TSU);
-    cudaDeviceSynchronize();
+    checkCudaError(cudaPeekAtLastError(),    "single_item_TSU_pruning launch param");
+    checkCudaError(cudaDeviceSynchronize(),  "single_item_TSU_pruning execution");
 
 //    cudaMemcpy(h_test, d_single_item_i_candidate, Gpu_Db.c_item_len* Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
 //
@@ -1820,7 +1841,8 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 
     reduceSum2Dkernel<<<gridSize, blockSize, smemSize>>>(
             d_single_item_i_candidate, d_single_item_i_candidate_sum, Gpu_Db.c_item_len);
-    cudaDeviceSynchronize();
+    checkCudaError(cudaPeekAtLastError(),    "reduceSum2Dkernel launch param");
+    checkCudaError(cudaDeviceSynchronize(),  "reduceSum2Dkernel execution");
 
 
 
@@ -1853,7 +1875,8 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
     gridSize = (Gpu_Db.c_item_len + (blockSize - 1))/blockSize;
     Arr_Multiplication<<<gridSize,blockSize>>>(d_single_item_s_candidate_sum,d_max_n,Gpu_Db.c_item_len);
     Arr_Multiplication<<<gridSize,blockSize>>>(d_single_item_i_candidate_sum,d_max_n,Gpu_Db.c_item_len);
-    cudaDeviceSynchronize();
+    checkCudaError(cudaPeekAtLastError(),    "Arr_Multiplication launch param");
+    checkCudaError(cudaDeviceSynchronize(),  "Arr_Multiplication execution");
 
 //    cudaMemcpy(h_sums, d_single_item_s_candidate_sum, Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
 //
@@ -1894,7 +1917,8 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
             d_i_candidate_blockResults,
             Gpu_Db.c_item_len
     );
-    cudaDeviceSynchronize();
+    checkCudaError(cudaPeekAtLastError(),    "reduceMaxKernel launch param");
+    checkCudaError(cudaDeviceSynchronize(),  "reduceMaxKernel execution");
 
     // 現在 blockResults 裏面有 blocksPerGrid 個 block 的最大值
     // 若 blocksPerGrid > 1，還需要繼續歸約
@@ -1914,7 +1938,8 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
                 d_i_candidate_blockResults,  // 輸出也放這裡 (in-place)
                 curSize
         );
-        cudaDeviceSynchronize();
+        checkCudaError(cudaPeekAtLastError(),    "reduceMaxKernel launch param");
+        checkCudaError(cudaDeviceSynchronize(),  "reduceMaxKernel execution");
 
         curSize = newBlocksPerGrid;
     }
