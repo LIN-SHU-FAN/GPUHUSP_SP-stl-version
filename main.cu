@@ -548,7 +548,7 @@ __global__ void count_chain_offset_size(int *  __restrict__  d_sequence_len,//DB
     //printf("blockDim.x=%d threadIdx.x=%d\n",blockIdx.x,threadIdx.x);
     if(threadIdx.x==0){
         d_max_n[blockIdx.x] = sub_data[0];
-        d_item_memory_overall_size[blockIdx.x] = sub_data[0] * d_c_sid_len[blockIdx.x];//max_n * item的sid投影點數量
+        d_item_memory_overall_size[blockIdx.x] = sub_data[0] * (d_c_sid_len[blockIdx.x]+1);//max_n * item的sid投影點數量
         //printf("blockIdx.x=%d sub_data[0]=%d d_c_sid_len[blockIdx.x]=%d d_item_memory_overall_size[blockIdx.x]=%d\n",blockIdx.x,sub_data[0],d_c_sid_len[blockIdx.x],d_item_memory_overall_size[blockIdx.x]);
     }
 
@@ -1711,7 +1711,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 
     //###################
     ///計算offsets和chain_sid空間
-    ///max(max_n* item的sid投影點數量)
+    ///max(max_n* (item的sid投影點數量+1))
     //###################
     //max_n
     //重用d_item_memory_overall_size算每個single中最大的offset大小
@@ -2029,7 +2029,8 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 //        }
 //        cout<<endl;
 //    }
-////
+
+
 //    cudaMemcpy(h_test, d_single_item_s_candidate_TSU, Gpu_Db.c_item_len* Gpu_Db.c_item_len * sizeof(int), cudaMemcpyDeviceToHost);
 //
 //    for(int i=0;i<Gpu_Db.c_item_len;i++){
@@ -2341,7 +2342,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 
     stack<Tree_node*> DFS_stack;
     Tree_node *node;
-
+    Tree_node *DFS_node;
     //預先配置prefixSumAndScatter需要用到的變數
     int *d_Scan;//中間結果，用來暫存 prefix sum
     CHECK_CUDA(cudaMalloc(&d_Scan, Gpu_Db.c_item_len * sizeof(int)));
@@ -2382,13 +2383,13 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
         node->d_tree_node_s_list_size = totalOnes;
         d_tree_node_s_list_global_memory_index += totalOnes;
 
-        std::vector<int> hB(totalOnes);
-        CHECK_CUDA(cudaMemcpy(hB.data(), d_tree_node_s_list_global_memory, totalOnes * sizeof(int), cudaMemcpyDeviceToHost));
-
-        std::cout <<single_item<<":";
-        std::cout << "B = [ ";
-        for (auto &x : hB) std::cout << x << " ";
-        std::cout << "]\n";  // 期待 [1, 4]
+//        std::vector<int> hB(totalOnes);
+//        CHECK_CUDA(cudaMemcpy(hB.data(), d_tree_node_s_list_global_memory, totalOnes * sizeof(int), cudaMemcpyDeviceToHost));
+//
+//        std::cout <<single_item<<":";
+//        std::cout << "B = [ ";
+//        for (auto &x : hB) std::cout << x << " ";
+//        std::cout << "]\n";
 
         prefixSumAndScatter(d_single_item_i_candidate+single_item*Gpu_Db.c_item_len, d_tree_node_i_list_global_memory, d_Scan, Gpu_Db.c_item_len,prefixSumAndScatter_blockSize,prefixSumAndScatter_numBlocks,d_blockSums, totalOnes);
 
@@ -2396,15 +2397,32 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
         node->d_tree_node_i_list_size = totalOnes;
         d_tree_node_i_list_global_memory_index += totalOnes;
 
-        std::vector<int> hB_i(totalOnes);
-        CHECK_CUDA(cudaMemcpy(hB_i.data(), d_tree_node_i_list_global_memory, totalOnes * sizeof(int), cudaMemcpyDeviceToHost));
+//        std::vector<int> hB_i(totalOnes);
+//        CHECK_CUDA(cudaMemcpy(hB_i.data(), d_tree_node_i_list_global_memory, totalOnes * sizeof(int), cudaMemcpyDeviceToHost));
+//
+//        std::cout <<single_item<<":";
+//        std::cout << "B = [ ";
+//        for (auto &x : hB_i) std::cout << x << " ";
+//        std::cout << "]\n";
 
-        std::cout <<single_item<<":";
-        std::cout << "B = [ ";
-        for (auto &x : hB_i) std::cout << x << " ";
-        std::cout << "]\n";  // 期待 [1, 4]
-
-
+        DFS_stack.push(node);
+        //開始DFS
+        while(!DFS_stack.empty()){
+            DFS_node = DFS_stack.top();
+            if(DFS_node->d_tree_node_s_list_size>0){
+                node = new Tree_node;
+                
+                
+                
+                
+            }else if(DFS_node->d_tree_node_i_list_size>0){
+                
+            }else{
+                DFS_stack.pop();
+                delete DFS_node;
+            }
+        }
+        //delete node;
 
     }
 
