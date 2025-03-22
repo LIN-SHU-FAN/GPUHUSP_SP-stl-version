@@ -108,6 +108,8 @@ public:
 
     int d_tree_node_chain_offset_size;
     int *d_tree_node_chain_offset;//chain_offset
+
+    int d_tree_node_chain_sid_size;
     int *d_tree_node_chain_sid;//真正的sid
 
     int d_tree_node_i_list_size;
@@ -1337,6 +1339,44 @@ void prefixSumAndScatter(const int* d_A,
 
 }
 
+__global__ void get_chain_start_len(int *chain_instance_start,int *chain_instance_len,
+                                    int *chain_offset_start, int *chain_offset_len,
+                                    int *chain_sid_start, int *chain_sid_len,
+                                    int item,
+                                    int * d_flat_single_item_chain,int *d_chain_offsets_level1,int *d_chain_offsets_level2,
+                                    int * d_flat_chain_sid,int * d_chain_sid_offsets
+                                    )
+{
+    *chain_instance_start = d_chain_offsets_level2[d_chain_offsets_level1[item]];
+    *chain_instance_len = d_chain_offsets_level2[d_chain_offsets_level1[item+1]]-*chain_instance_start;
+
+    *chain_offset_start = d_chain_offsets_level1[item];
+    *chain_offset_len = d_chain_offsets_level1[item+1] - *chain_offset_start +1;
+
+    *chain_sid_start =  d_chain_sid_offsets[item];
+    *chain_sid_len = d_chain_sid_offsets[item+1] - *chain_sid_start;
+}
+
+__global__ void testt(int * d_tree_node_chain_instance,int d_tree_node_chain_size,
+                      int * d_tree_node_chain_offset,int d_tree_node_chain_offset_size,
+                      int * d_tree_node_chain_sid,int d_tree_node_chain_sid_size
+                      ){
+    for(int i =0;i<d_tree_node_chain_size;i++){
+        printf("%d ",d_tree_node_chain_instance[i]);
+    }
+    printf("\n");
+
+    for(int i =0;i<d_tree_node_chain_offset_size;i++){
+        printf("%d ",d_tree_node_chain_offset[i]);
+    }
+
+    printf("\n");
+    for(int i =0;i<d_tree_node_chain_sid_size;i++){
+        printf("%d ",d_tree_node_chain_sid[i]);
+    }
+    printf("\n");
+
+}
 
 
 
@@ -2298,7 +2338,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
     //###################
     std::cout << "tree_node_chain_max_memory:" << tree_node_chain_max_memory << std::endl;
 
-    int d_tree_node_chain_global_memory_index=0;//目前用多少空間
+    int d_tree_node_chain_global_memory_index=0;//目前用多少空間(也是下一個node的起始位置)
     int *d_tree_node_chain_instance_global_memory;//裝資料->投影位置
     cudaMalloc(&d_tree_node_chain_instance_global_memory, tree_node_chain_max_memory * sizeof(int));
 
@@ -2311,11 +2351,11 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
     ///建樹上節點的chain的offset和chain_sid(真正的sid)空間
     //###################
     cout<<"tree_node_chain_offset_max_memory:"<<tree_node_chain_offset_max_memory<<endl;
-    int d_tree_node_chain_offset_global_memory_index=0;//目前用多少空間
+    int d_tree_node_chain_offset_global_memory_index=0;//目前用多少空間(也是下一個node的起始位置)
     int *d_tree_node_chain_offset_global_memory;//裝chain的offset
     cudaMalloc(&d_tree_node_chain_offset_global_memory, tree_node_chain_offset_max_memory * sizeof(int));
 
-    int d_tree_node_chain_sid_global_memory_index=0;//目前用多少空間
+    int d_tree_node_chain_sid_global_memory_index=0;//目前用多少空間(也是下一個node的起始位置)
     int *d_tree_node_chain_sid_global_memory;//裝chain_sid(真正的sid)
     cudaMalloc(&d_tree_node_chain_sid_global_memory, tree_node_chain_offset_max_memory * sizeof(int));
 
@@ -2326,12 +2366,12 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
     ///建樹上節點的i s list空間
     //###################
     cout<<"single_item_i_candidate_max_memory:"<<single_item_i_candidate_max_memory<<endl;
-    int d_tree_node_i_list_global_memory_index=0;//目前用多少空間
+    int d_tree_node_i_list_global_memory_index=0;//目前用多少空間(也是下一個node的起始位置)
     int *d_tree_node_i_list_global_memory;
     cudaMalloc(&d_tree_node_i_list_global_memory, single_item_i_candidate_max_memory * sizeof(int));
 
     cout<<"single_item_s_candidate_max_memory:"<<single_item_s_candidate_max_memory<<endl;
-    int d_tree_node_s_list_global_memory_index=0;//目前用多少空間
+    int d_tree_node_s_list_global_memory_index=0;//目前用多少空間(也是下一個node的起始位置)
     int *d_tree_node_s_list_global_memory;
     cudaMalloc(&d_tree_node_s_list_global_memory, single_item_s_candidate_max_memory * sizeof(int));
 
@@ -2341,9 +2381,30 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
     ///建構tree_node到DFS_stack中
 
     stack<Tree_node*> DFS_stack;
+
     Tree_node *node;
     Tree_node *DFS_node;
-    //預先配置prefixSumAndScatter需要用到的變數
+
+    ///預先配置取得陣列值變數
+
+    int *chain_instance_start, *chain_instance_len;
+
+    cudaMallocManaged(&chain_instance_start, sizeof(int));//用Unified Memory
+    cudaMallocManaged(&chain_instance_len, sizeof(int));
+
+    int *chain_offset_start, *chain_offset_len;
+
+    cudaMallocManaged(&chain_offset_start, sizeof(int));//用Unified Memory
+    cudaMallocManaged(&chain_offset_len, sizeof(int));
+
+    int *chain_sid_start, *chain_sid_len;
+
+    cudaMallocManaged(&chain_sid_start, sizeof(int));//用Unified Memory
+    cudaMallocManaged(&chain_sid_len, sizeof(int));
+
+    ///預先配置prefixSumAndScatter需要用到的變數
+    int totalOnes = 0;
+
     int *d_Scan;//中間結果，用來暫存 prefix sum
     CHECK_CUDA(cudaMalloc(&d_Scan, Gpu_Db.c_item_len * sizeof(int)));
 
@@ -2359,7 +2420,9 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
         CHECK_CUDA(cudaMalloc(&d_blockSums, prefixSumAndScatter_numBlocks * sizeof(int)));
     }
 
-    int totalOnes = 0;
+
+
+
 
     for(int single_item=0;single_item<Gpu_Db.c_item_len;single_item++){
         if(h_chain_single_item_utility_bool[single_item]){
@@ -2371,6 +2434,56 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 
         node = new Tree_node;
         node->pattern = to_string(single_item);
+
+
+
+        get_chain_start_len<<<1,1>>>(chain_instance_start,chain_instance_len,
+                                     chain_offset_start, chain_offset_len,
+                                     chain_sid_start, chain_sid_len,
+                                     single_item,
+                                     d_flat_single_item_chain,d_chain_offsets_level1,d_chain_offsets_level2,
+                                     d_flat_chain_sid,d_chain_sid_offsets);
+        cudaDeviceSynchronize();
+
+        //cout<<single_item<<":"<<*chain_instance_start<<" "<<*chain_instance_len<<endl;
+
+        node->d_tree_node_chain_size = *chain_instance_len;
+        d_tree_node_chain_global_memory_index += *chain_instance_len;
+
+        node->d_tree_node_chain_instance = d_tree_node_chain_instance_global_memory;
+        CHECK_CUDA(cudaMemcpy(node->d_tree_node_chain_instance,            // 目的地指標 (device)
+                              d_flat_single_item_chain + *chain_instance_start,    // 來源指標 (device) + 偏移量
+                              *chain_instance_len * sizeof(int),
+                              cudaMemcpyDeviceToDevice
+        ));
+
+
+
+        node->d_tree_node_chain_offset_size = *chain_offset_len;
+        d_tree_node_chain_offset_global_memory_index += *chain_offset_len;
+
+        node->d_tree_node_chain_offset = d_tree_node_chain_offset_global_memory;
+        CHECK_CUDA(cudaMemcpy(node->d_tree_node_chain_offset,            // 目的地指標 (device)
+                              d_chain_offsets_level2 + *chain_offset_start,    // 來源指標 (device) + 偏移量
+                              *chain_offset_len * sizeof(int),
+                              cudaMemcpyDeviceToDevice
+        ));
+        ///扣掉node->d_tree_node_chain_offset[0]
+
+        node->d_tree_node_chain_sid_size = *chain_sid_len;
+        d_tree_node_chain_sid_global_memory_index += *chain_sid_len;
+
+        node->d_tree_node_chain_sid = d_tree_node_chain_sid_global_memory;
+        CHECK_CUDA(cudaMemcpy(node->d_tree_node_chain_sid,            // 目的地指標 (device)
+                              d_flat_chain_sid + *chain_sid_start,    // 來源指標 (device) + 偏移量
+                              *chain_sid_len * sizeof(int),
+                              cudaMemcpyDeviceToDevice
+        ));
+
+        testt<<<1,1>>>(node->d_tree_node_chain_instance,node->d_tree_node_chain_size,
+                       node->d_tree_node_chain_offset,node->d_tree_node_chain_offset_size,
+                       node->d_tree_node_chain_sid,node->d_tree_node_chain_sid_size);
+        cudaDeviceSynchronize();
 
         //int *d_single_item_s_candidate,*d_single_item_i_candidate;
         //建立single item candidate
@@ -2405,24 +2518,27 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 //        for (auto &x : hB_i) std::cout << x << " ";
 //        std::cout << "]\n";
 
-        DFS_stack.push(node);
-        //開始DFS
-        while(!DFS_stack.empty()){
-            DFS_node = DFS_stack.top();
-            if(DFS_node->d_tree_node_s_list_size>0){
-                node = new Tree_node;
-                
-                
-                
-                
-            }else if(DFS_node->d_tree_node_i_list_size>0){
-                
-            }else{
-                DFS_stack.pop();
-                delete DFS_node;
-            }
-        }
-        //delete node;
+//        DFS_stack.push(node);
+//        //開始DFS
+//        while(!DFS_stack.empty()){
+//            DFS_node = DFS_stack.top();
+//            node = new Tree_node;//t'
+//            if(DFS_node->d_tree_node_s_list_size>0){//建t' chain
+//
+//
+//            }else if(DFS_node->d_tree_node_i_list_size>0){//建t' chain
+//
+//            }else{//沒有cadidate 刪掉節點
+//                DFS_stack.pop();
+//                delete DFS_node;
+//                delete node;
+//                continue;
+//            }
+//
+//
+//
+//        }
+
 
     }
 
