@@ -2502,8 +2502,9 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
                                      single_item,
                                      d_flat_single_item_chain,d_chain_offsets_level1,d_chain_offsets_level2,
                                      d_flat_chain_sid,d_chain_sid_offsets);
-        cudaDeviceSynchronize();
 
+        checkCudaError(cudaPeekAtLastError(),    "get_chain_start_len launch param");
+        checkCudaError(cudaDeviceSynchronize(),  "get_chain_start_len execution");
         //cout<<single_item<<":"<<*chain_instance_start<<" "<<*chain_instance_len<<endl;
 
         node->d_tree_node_chain_size = *chain_instance_len;
@@ -2538,7 +2539,8 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
         gridSize = (*chain_offset_len + blockSize - 1) / blockSize;
         //扣掉node->d_tree_node_chain_offset[0]
         subtractFirstElement<<<gridSize, blockSize>>>(node->d_tree_node_chain_offset, chain_offset_firstVal, *chain_offset_len);
-        cudaDeviceSynchronize();
+        checkCudaError(cudaPeekAtLastError(),    "subtractFirstElement launch param");
+        checkCudaError(cudaDeviceSynchronize(),  "subtractFirstElement execution");
 
         node->d_tree_node_chain_sid_size = *chain_sid_len;
         d_tree_node_chain_sid_global_memory_index += *chain_sid_len;
@@ -2561,12 +2563,13 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
                                                                  single_item,
                                                                  node->d_tree_node_chain_utility
                                                                  );
-        cudaDeviceSynchronize();
+        checkCudaError(cudaPeekAtLastError(),    "build_d_tree_node_chain_utility launch param");
+        checkCudaError(cudaDeviceSynchronize(),  "build_d_tree_node_chain_utility execution");
 
-        testt<<<1,1>>>(node->d_tree_node_chain_instance,node->d_tree_node_chain_utility,node->d_tree_node_chain_size,
-                       node->d_tree_node_chain_offset,node->d_tree_node_chain_offset_size,
-                       node->d_tree_node_chain_sid,node->d_tree_node_chain_sid_size);
-        cudaDeviceSynchronize();
+//        testt<<<1,1>>>(node->d_tree_node_chain_instance,node->d_tree_node_chain_utility,node->d_tree_node_chain_size,
+//                       node->d_tree_node_chain_offset,node->d_tree_node_chain_offset_size,
+//                       node->d_tree_node_chain_sid,node->d_tree_node_chain_sid_size);
+//        cudaDeviceSynchronize();
 
         //int *d_single_item_s_candidate,*d_single_item_i_candidate;
         //建立single item candidate
@@ -2589,6 +2592,8 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 
         prefixSumAndScatter(d_single_item_i_candidate+single_item*Gpu_Db.c_item_len, d_tree_node_i_list_global_memory, d_Scan, Gpu_Db.c_item_len,prefixSumAndScatter_blockSize,prefixSumAndScatter_numBlocks,d_blockSums, totalOnes);
 
+       
+
         node->d_tree_node_i_list = d_tree_node_i_list_global_memory;
         node->d_tree_node_i_list_size = totalOnes;
         d_tree_node_i_list_global_memory_index += totalOnes;
@@ -2601,26 +2606,36 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 //        for (auto &x : hB_i) std::cout << x << " ";
 //        std::cout << "]\n";
 
-//        DFS_stack.push(node);
-//        //開始DFS
-//        while(!DFS_stack.empty()){
-//            DFS_node = DFS_stack.top();
-//            node = new Tree_node;//t'
-//            if(DFS_node->d_tree_node_s_list_size>0){//建t' chain
-//
-//
-//            }else if(DFS_node->d_tree_node_i_list_size>0){//建t' chain
-//
-//            }else{//沒有cadidate 刪掉節點
-//                DFS_stack.pop();
-//                delete DFS_node;
-//                delete node;
-//                continue;
-//            }
-//
-//
-//
-//        }
+        DFS_stack.push(node);
+        //開始DFS
+        while(!DFS_stack.empty()){
+            DFS_node = DFS_stack.top();
+            node = new Tree_node;//t'
+            if(DFS_node->d_tree_node_s_list_size>0){//建t' chain
+                //要加上偏移量
+                node->d_tree_node_chain_sid
+                = d_tree_node_chain_sid_global_memory + d_tree_node_chain_sid_global_memory_index;
+
+//                CHECK_CUDA(cudaMemcpy(node->d_tree_node_chain_sid,            // 目的地指標 (device)
+//                                      DFS_node->d_tree_node_chain_sid,    // 來源指標 (device)
+//                                      DFS_node->d_tree_node_chain_sid_size * sizeof(int),
+//                                      cudaMemcpyDeviceToDevice
+//                ));
+
+            }
+            else if(DFS_node->d_tree_node_i_list_size>0){//建t' chain
+
+            }else{//沒有cadidate 刪掉節點
+                DFS_stack.pop();
+                delete DFS_node;
+                delete node;
+                continue;
+            }
+
+
+            //測試用 之後要砍掉
+            break;
+        }
 
 
     }
