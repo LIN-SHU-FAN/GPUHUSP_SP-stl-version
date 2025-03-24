@@ -1357,25 +1357,79 @@ __global__ void get_chain_start_len(int *chain_instance_start,int *chain_instanc
     *chain_sid_len = d_chain_sid_offsets[item+1] - *chain_sid_start;
 }
 
-__global__ void testt(int * d_tree_node_chain_instance,int d_tree_node_chain_size,
+// Kernel：將 d_A 中的每個元素扣掉 firstVal
+__global__ void subtractFirstElement(int* d_A, int firstVal, int n)
+{
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    if (idx < n)
+    {
+        d_A[idx] -= firstVal;
+    }
+}
+
+// 尋找 arr 當中「第一個 > key」的索引；若全部都 <= key，就回傳 size。
+__device__ int upper_bound_in_thread(const int* arr, int size, int key)
+{
+    int left = 0;
+    int right = size; // 注意這裡是 size，而不是 size-1
+    while (left < right) {
+        int mid = (left + right) >> 1;
+        int mid_val = arr[mid];
+        if (mid_val <= key) {
+            // mid_val <= key -> 我們要往右找「大於 key」的第一個位置
+            left = mid + 1;
+        } else {
+            // mid_val > key -> 縮小到 [left, mid]
+            right = mid;
+        }
+    }
+    // 迴圈結束後，left == right，且保證是「第一個 > key」或是 size
+    return left;
+}
+
+
+// 建構d_tree_node的utility
+__global__ void build_d_tree_node_chain_utility(int *d_tree_node_chain_instance,
+                                                int *d_tree_node_chain_offset,int offset_size,
+                                                int *d_tree_node_chain_sid,
+                                                int *d_iu,int *d_db_offsets,
+                                                int single_item,
+                                                int *d_tree_node_chain_utility)
+{
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x ;
+
+    int sid_index = upper_bound_in_thread(d_tree_node_chain_offset, offset_size, idx) - 1;
+    int sid = d_tree_node_chain_sid[sid_index];
+
+    d_tree_node_chain_utility[idx] = d_iu[d_db_offsets[sid]+d_tree_node_chain_instance[idx]];
+
+}
+
+
+__global__ void testt(int * d_tree_node_chain_instance,int *d_tree_node_chain_utility,int d_tree_node_chain_size,
                       int * d_tree_node_chain_offset,int d_tree_node_chain_offset_size,
                       int * d_tree_node_chain_sid,int d_tree_node_chain_sid_size
                       ){
     for(int i =0;i<d_tree_node_chain_size;i++){
-        printf("%d ",d_tree_node_chain_instance[i]);
+        printf("d_tree_node_chain_instance:%d ",d_tree_node_chain_instance[i]);
+    }
+    printf("\n");
+
+    for(int i =0;i<d_tree_node_chain_size;i++){
+        printf("d_tree_node_chain_utility:%d ",d_tree_node_chain_utility[i]);
     }
     printf("\n");
 
     for(int i =0;i<d_tree_node_chain_offset_size;i++){
-        printf("%d ",d_tree_node_chain_offset[i]);
+        printf("d_tree_node_chain_offset:%d ",d_tree_node_chain_offset[i]);
     }
 
     printf("\n");
     for(int i =0;i<d_tree_node_chain_sid_size;i++){
-        printf("%d ",d_tree_node_chain_sid[i]);
+        printf("d_tree_node_chain_sid:%d ",d_tree_node_chain_sid[i]);
     }
-    printf("\n");
-
+    printf("\n\n");
 }
 
 
@@ -2339,6 +2393,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
     std::cout << "tree_node_chain_max_memory:" << tree_node_chain_max_memory << std::endl;
 
     int d_tree_node_chain_global_memory_index=0;//目前用多少空間(也是下一個node的起始位置)
+
     int *d_tree_node_chain_instance_global_memory;//裝資料->投影位置
     cudaMalloc(&d_tree_node_chain_instance_global_memory, tree_node_chain_max_memory * sizeof(int));
 
@@ -2397,6 +2452,8 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
     cudaMallocManaged(&chain_offset_start, sizeof(int));//用Unified Memory
     cudaMallocManaged(&chain_offset_len, sizeof(int));
 
+    int chain_offset_firstVal;
+
     int *chain_sid_start, *chain_sid_len;
 
     cudaMallocManaged(&chain_sid_start, sizeof(int));//用Unified Memory
@@ -2432,11 +2489,13 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
             continue;
         }
 
+
+        ///建構single的node
         node = new Tree_node;
         node->pattern = to_string(single_item);
 
 
-
+        //取得single_item在chain上的開始位置和長度
         get_chain_start_len<<<1,1>>>(chain_instance_start,chain_instance_len,
                                      chain_offset_start, chain_offset_len,
                                      chain_sid_start, chain_sid_len,
@@ -2458,7 +2517,6 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
         ));
 
 
-
         node->d_tree_node_chain_offset_size = *chain_offset_len;
         d_tree_node_chain_offset_global_memory_index += *chain_offset_len;
 
@@ -2468,7 +2526,19 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
                               *chain_offset_len * sizeof(int),
                               cudaMemcpyDeviceToDevice
         ));
-        ///扣掉node->d_tree_node_chain_offset[0]
+
+        //讀取node->d_tree_node_chain_offset[0]
+        CHECK_CUDA(cudaMemcpy(&chain_offset_firstVal,            // 目的地指標 (device)
+                              node->d_tree_node_chain_offset,    // 來源指標 (device) + 偏移量
+                              sizeof(int),
+                              cudaMemcpyDeviceToHost
+        ));
+
+        blockSize = *chain_offset_len>max_num_threads?max_num_threads:*chain_offset_len;
+        gridSize = (*chain_offset_len + blockSize - 1) / blockSize;
+        //扣掉node->d_tree_node_chain_offset[0]
+        subtractFirstElement<<<gridSize, blockSize>>>(node->d_tree_node_chain_offset, chain_offset_firstVal, *chain_offset_len);
+        cudaDeviceSynchronize();
 
         node->d_tree_node_chain_sid_size = *chain_sid_len;
         d_tree_node_chain_sid_global_memory_index += *chain_sid_len;
@@ -2480,7 +2550,20 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
                               cudaMemcpyDeviceToDevice
         ));
 
-        testt<<<1,1>>>(node->d_tree_node_chain_instance,node->d_tree_node_chain_size,
+
+        node->d_tree_node_chain_utility = d_tree_node_chain_utility_global_memory;
+        blockSize = *chain_instance_len>max_num_threads?max_num_threads:*chain_instance_len;
+        gridSize = (*chain_instance_len + blockSize - 1) / blockSize;
+        build_d_tree_node_chain_utility<<<gridSize, blockSize>>>(node->d_tree_node_chain_instance,
+                                                                 node->d_tree_node_chain_offset,node->d_tree_node_chain_offset_size,
+                                                                 node->d_tree_node_chain_sid,
+                                                                 d_iu,d_db_offsets,
+                                                                 single_item,
+                                                                 node->d_tree_node_chain_utility
+                                                                 );
+        cudaDeviceSynchronize();
+
+        testt<<<1,1>>>(node->d_tree_node_chain_instance,node->d_tree_node_chain_utility,node->d_tree_node_chain_size,
                        node->d_tree_node_chain_offset,node->d_tree_node_chain_offset_size,
                        node->d_tree_node_chain_sid,node->d_tree_node_chain_sid_size);
         cudaDeviceSynchronize();
