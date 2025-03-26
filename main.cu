@@ -113,9 +113,11 @@ public:
     int *d_tree_node_chain_sid;//真正的sid
 
     int d_tree_node_i_list_size;
+    int d_tree_node_i_list_index;//存目前做到哪個candidate(從0開始)
     int *d_tree_node_i_list;
 
     int d_tree_node_s_list_size;
+    int d_tree_node_s_list_index;//存目前做到哪個candidate(從0開始)
     int *d_tree_node_s_list;
 
 };
@@ -593,6 +595,7 @@ __global__ void count_single_item_s_candidate(int total_item_num,
                                               int *__restrict__ d_flat_table_seq_len,int *__restrict__ d_table_seq_len_offsets,
                                               int *__restrict__ d_single_item_s_candidate_TSU
 ){
+
     //blockIdx.x = 0～single item chain總共有多少sid
     //d_sid_map_item[blockIdx.x] = item
     //blockIdx.x-d_sid_accumulate[blockIdx.x] = sid(還不是真的sid 轉化後才是)
@@ -1432,6 +1435,81 @@ __global__ void testt(int * d_tree_node_chain_instance,int *d_tree_node_chain_ut
     printf("\n\n");
 }
 
+
+__global__ void find_s_extension_project_num(int *d_tid,int * d_db_offsets,
+                                             int *d_flat_indices_table,int *d_table_offsets_level1,int *d_table_offsets_level2,
+                                             int *d_flat_table_item,int *d_table_item_offsets,
+                                             int *d_table_item_len,
+                                             int *d_flat_table_seq_len,int *d_table_seq_len_offsets,
+                                             int *t_tree_node_chain_instance,int *t_tree_node_chain_offset,
+                                             int *t_tree_node_s_list,int t_s_list_index,
+                                             int *t_tree_node_chain_sid,int t_chain_sid_len,
+                                             int *tt_tree_node_chain_offset ,int tt_chain_offset_len//tt=t'
+                                             ){
+//    if(threadIdx.x == 0 && blockIdx.x == 0){
+//        printf("d_flat_indices_table = 12 :%d\n",d_flat_indices_table[d_table_offsets_level2[d_table_offsets_level1[12]+0]+1]);
+//
+//    }
+
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    //真實sid
+    int sid = t_tree_node_chain_sid[idx];
+    //t的chain中每個sid的第一個instance
+    int t_first_instance_index = t_tree_node_chain_instance[t_tree_node_chain_offset[idx]];
+    //要擴展的item
+    int extension_item = t_tree_node_s_list[t_s_list_index];
+
+    int sid_item_num = d_table_item_len[sid];//table中在這個sid有多少種item
+
+    //找要擴展的item有沒有在table中，沒的話offset就回傳0，有的話會回傳table的item的index(不是真的item)
+    int extension_item_in_table_sid_index = binary_search_in_thread(&d_flat_table_item[d_table_item_offsets[sid]],sid_item_num,extension_item);
+
+
+
+    if(extension_item_in_table_sid_index == -1){//此sid沒有可擴展的item
+        tt_tree_node_chain_offset[idx] = 0;
+        return;  // 該 thread 終止
+    }
+
+//    printf("sid:%d extension_item:%d extension_item_in_table_sid_index:%d\n",sid,extension_item,extension_item_in_table_sid_index);
+
+
+    //要擴展的item在table中此sid的長度
+    int extension_item_in_sid_len = d_flat_table_seq_len[d_table_seq_len_offsets[sid]+extension_item_in_table_sid_index];
+//    printf("extension_item_in_sid_len:%d\n",extension_item_in_sid_len);
+//
+//    printf("d_flat_indices_table = 12 :%d\n",d_flat_indices_table[d_table_offsets_level2[d_table_offsets_level1[12]+0]+1]);
+//
+//    printf("d_flat_indices_table:%d\n",d_flat_indices_table[d_table_offsets_level2[d_table_offsets_level1[sid]+extension_item_in_table_sid_index]+1]);
+    for(int i=0;i<extension_item_in_sid_len;i++){
+        //找到第一個超過t_first_instance_index的index 且 tid>t_first_instance_index，代表找到了第一個可擴展的投影點
+        int i_instance_index = d_flat_indices_table[d_table_offsets_level2[d_table_offsets_level1[sid]+extension_item_in_table_sid_index]+i];
+        //printf("t_first_instance_index:%d i_instance_index:%d\n",t_first_instance_index,i_instance_index);
+
+        if(t_first_instance_index<i_instance_index){
+            if(d_tid[d_db_offsets[sid]+t_first_instance_index]<d_tid[d_db_offsets[sid]+i_instance_index]){
+                tt_tree_node_chain_offset[idx] = extension_item_in_sid_len-i;
+
+                //printf("5464544");
+                break;
+            }
+        }
+
+        if(i==extension_item_in_sid_len-1){//到這裡沒找到代表沒有投影點
+            tt_tree_node_chain_offset[idx] = 0;
+        }
+    }
+}
+
+__global__ void testtt(int * tt_tree_node_chain_offset,int tt_tree_node_chain_offset_size
+){
+    for(int i =0;i<tt_tree_node_chain_offset_size;i++){
+        printf("tt_tree_node_chain_offset:%d ",tt_tree_node_chain_offset[i]);
+    }
+
+    printf("\n\n");
+}
 
 
 void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HUSP_num){
@@ -2438,7 +2516,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
     stack<Tree_node*> DFS_stack;
 
     Tree_node *node;
-    Tree_node *DFS_node;
+    Tree_node *t_node;
 
     ///預先配置取得陣列值變數
 
@@ -2566,10 +2644,10 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
         checkCudaError(cudaPeekAtLastError(),    "build_d_tree_node_chain_utility launch param");
         checkCudaError(cudaDeviceSynchronize(),  "build_d_tree_node_chain_utility execution");
 
-//        testt<<<1,1>>>(node->d_tree_node_chain_instance,node->d_tree_node_chain_utility,node->d_tree_node_chain_size,
-//                       node->d_tree_node_chain_offset,node->d_tree_node_chain_offset_size,
-//                       node->d_tree_node_chain_sid,node->d_tree_node_chain_sid_size);
-//        cudaDeviceSynchronize();
+        testt<<<1,1>>>(node->d_tree_node_chain_instance,node->d_tree_node_chain_utility,node->d_tree_node_chain_size,
+                       node->d_tree_node_chain_offset,node->d_tree_node_chain_offset_size,
+                       node->d_tree_node_chain_sid,node->d_tree_node_chain_sid_size);
+        cudaDeviceSynchronize();
 
         //int *d_single_item_s_candidate,*d_single_item_i_candidate;
         //建立single item candidate
@@ -2579,6 +2657,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
         prefixSumAndScatter(d_single_item_s_candidate+single_item*Gpu_Db.c_item_len, d_tree_node_s_list_global_memory, d_Scan, Gpu_Db.c_item_len,prefixSumAndScatter_blockSize,prefixSumAndScatter_numBlocks,d_blockSums, totalOnes);
 
         node->d_tree_node_s_list = d_tree_node_s_list_global_memory;
+        node->d_tree_node_s_list_index = 0;
         node->d_tree_node_s_list_size = totalOnes;
         d_tree_node_s_list_global_memory_index += totalOnes;
 
@@ -2592,9 +2671,8 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 
         prefixSumAndScatter(d_single_item_i_candidate+single_item*Gpu_Db.c_item_len, d_tree_node_i_list_global_memory, d_Scan, Gpu_Db.c_item_len,prefixSumAndScatter_blockSize,prefixSumAndScatter_numBlocks,d_blockSums, totalOnes);
 
-       
-
         node->d_tree_node_i_list = d_tree_node_i_list_global_memory;
+        node->d_tree_node_i_list_index = 0;
         node->d_tree_node_i_list_size = totalOnes;
         d_tree_node_i_list_global_memory_index += totalOnes;
 
@@ -2606,28 +2684,63 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 //        for (auto &x : hB_i) std::cout << x << " ";
 //        std::cout << "]\n";
 
+
         DFS_stack.push(node);
         //開始DFS
         while(!DFS_stack.empty()){
-            DFS_node = DFS_stack.top();
+            t_node = DFS_stack.top();
             node = new Tree_node;//t'
-            if(DFS_node->d_tree_node_s_list_size>0){//建t' chain
-                //要加上偏移量
-                node->d_tree_node_chain_sid
-                = d_tree_node_chain_sid_global_memory + d_tree_node_chain_sid_global_memory_index;
+            if(t_node->d_tree_node_s_list_index < t_node->d_tree_node_s_list_size){//建t' chain (代表s candidate有東西能長)
+                //cout<<"d_tree_node_s_list_size:"<<t_node->d_tree_node_s_list_size<<endl;
 
-//                CHECK_CUDA(cudaMemcpy(node->d_tree_node_chain_sid,            // 目的地指標 (device)
-//                                      DFS_node->d_tree_node_chain_sid,    // 來源指標 (device)
-//                                      DFS_node->d_tree_node_chain_sid_size * sizeof(int),
-//                                      cudaMemcpyDeviceToDevice
-//                ));
+                //要加上偏移量
+                node->d_tree_node_chain_sid = d_tree_node_chain_sid_global_memory + d_tree_node_chain_sid_global_memory_index;
+
+                //把父節點的offset直接搬過來
+                CHECK_CUDA(cudaMemcpy(node->d_tree_node_chain_sid,
+                                      t_node->d_tree_node_chain_sid,
+                                      t_node->d_tree_node_chain_sid_size * sizeof(int),
+                                      cudaMemcpyDeviceToDevice));
+
+                node->d_tree_node_chain_sid_size = t_node->d_tree_node_chain_sid_size;
+
+                node->d_tree_node_chain_offset = d_tree_node_chain_offset_global_memory + d_tree_node_chain_offset_global_memory_index;
+                node->d_tree_node_chain_offset_size = t_node->d_tree_node_chain_offset_size;
+
+                //找投影點建立offset 先將offset空間用來存每個sid有多少個投影點 後面再弄成真的offset
+                blockSize = t_node->d_tree_node_chain_sid_size>max_num_threads?max_num_threads:t_node->d_tree_node_chain_sid_size;
+                gridSize = (t_node->d_tree_node_chain_sid_size + blockSize - 1) / blockSize;
+
+
+                find_s_extension_project_num<<<gridSize,blockSize>>>(d_tid,d_db_offsets,
+                                                                     d_flat_indices_table,d_table_offsets_level1,d_table_offsets_level2,
+                                                                     d_flat_table_item,d_table_item_offsets,
+                                                                     d_table_item_len,
+                                                                     d_flat_table_seq_len,d_table_seq_len_offsets,
+                                                                     t_node->d_tree_node_chain_instance,t_node->d_tree_node_chain_offset,
+                                                                     t_node->d_tree_node_s_list,t_node->d_tree_node_s_list_index,
+                                                                     t_node->d_tree_node_chain_sid,t_node->d_tree_node_chain_sid_size,
+                                                                     node->d_tree_node_chain_offset,node->d_tree_node_chain_offset_size);
+                checkCudaError(cudaPeekAtLastError(),    "find_s_extension_project_num launch param");
+                checkCudaError(cudaDeviceSynchronize(),  "find_s_extension_project_num execution");
+
+                //d_tree_node_chain_sid_global_memory_index += size_to_copy;
+
+//                cout<<"pattern:"<<t_node->pattern<<"\n";
+//                testtt<<<1,1>>>(node->d_tree_node_chain_offset,t_node->d_tree_node_chain_offset_size-1);
+//                checkCudaError(cudaPeekAtLastError(),    "testtt launch param");
+//                checkCudaError(cudaDeviceSynchronize(),  "testtt execution");
+
+
+                t_node->d_tree_node_s_list_index++;
+                break;
 
             }
-            else if(DFS_node->d_tree_node_i_list_size>0){//建t' chain
+            else if(t_node->d_tree_node_i_list_index<t_node->d_tree_node_i_list_size){//建t' chain
 
             }else{//沒有cadidate 刪掉節點
                 DFS_stack.pop();
-                delete DFS_node;
+                delete t_node;
                 delete node;
                 continue;
             }
