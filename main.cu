@@ -1680,6 +1680,8 @@ void compactInPlace(int *offset, int *sid,
 
 
 
+
+
 void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HUSP_num){
 
     size_t freeMem = 0;
@@ -2407,7 +2409,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
     ///聚合d_single_item_i_candidate_TSU_chain_sid_num
     sum_i_candidate_TSU_chain_sid_num_Segments_LargeN<<<gridSize,blockSize>>>(d_single_item_i_candidate_TSU_chain_sid_num,
                                                             d_c_seq_len_offsets,
-                                                            int(flat_c_seq_len.size()),//offsets count
+                                                            int(c_seq_len_offsets.size()),//offsets count
                                                             Gpu_Db.c_item_len,
                                                             d_single_item_i_candidate_TSU
                                                         );
@@ -2856,13 +2858,13 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
         d_tree_node_s_list_global_memory_index = 0;
         d_tree_node_s_list_global_memory_index += totalOnes;
 
-//        std::vector<int> hB(totalOnes);
-//        CHECK_CUDA(cudaMemcpy(hB.data(), d_tree_node_s_list_global_memory, totalOnes * sizeof(int), cudaMemcpyDeviceToHost));
-//
-//        std::cout <<single_item<<":";
-//        std::cout << "B = [ ";
-//        for (auto &x : hB) std::cout << x << " ";
-//        std::cout << "]\n";
+        std::vector<int> hB(totalOnes);
+        CHECK_CUDA(cudaMemcpy(hB.data(), d_tree_node_s_list_global_memory, totalOnes * sizeof(int), cudaMemcpyDeviceToHost));
+
+        std::cout <<single_item<<":";
+        std::cout << "B = [ ";
+        for (auto &x : hB) std::cout << x << " ";
+        std::cout << "]\n";
 
         prefixSumAndScatter(d_single_item_i_candidate+single_item*Gpu_Db.c_item_len, d_tree_node_i_list_global_memory, d_Scan, Gpu_Db.c_item_len,prefixSumAndScatter_blockSize,prefixSumAndScatter_numBlocks,d_blockSums, totalOnes);
 
@@ -2874,13 +2876,13 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
         d_tree_node_i_list_global_memory_index = 0;
         d_tree_node_i_list_global_memory_index += totalOnes;
 
-//        std::vector<int> hB_i(totalOnes);
-//        CHECK_CUDA(cudaMemcpy(hB_i.data(), d_tree_node_i_list_global_memory, totalOnes * sizeof(int), cudaMemcpyDeviceToHost));
-//
-//        std::cout <<single_item<<":";
-//        std::cout << "B = [ ";
-//        for (auto &x : hB_i) std::cout << x << " ";
-//        std::cout << "]\n";
+        std::vector<int> hB_i(totalOnes);
+        CHECK_CUDA(cudaMemcpy(hB_i.data(), d_tree_node_i_list_global_memory, totalOnes * sizeof(int), cudaMemcpyDeviceToHost));
+
+        std::cout <<single_item<<":";
+        std::cout << "B = [ ";
+        for (auto &x : hB_i) std::cout << x << " ";
+        std::cout << "]\n";
 
 
         DFS_stack.push(node);
@@ -2928,46 +2930,79 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 
 //                d_tree_node_chain_sid_global_memory_index += size_to_copy;
 
-                cout<<"pattern:"<<t_node->pattern<<"\n";
+                cout<<"pattern:"<<node->pattern<<"\n";
                 testtt<<<1,1>>>(node->d_tree_node_chain_offset,t_node->d_tree_node_chain_offset_size-1);
                 checkCudaError(cudaPeekAtLastError(),    "testtt launch param");
                 checkCudaError(cudaDeviceSynchronize(),  "testtt execution");
 
-                int h_final ;
+                cout<<"d_tree_node_chain_sid:"<<"\n";
+                testtt<<<1,1>>>(node->d_tree_node_chain_sid,node->d_tree_node_chain_sid_size);
+                checkCudaError(cudaPeekAtLastError(),    "testtt launch param");
+                checkCudaError(cudaDeviceSynchronize(),  "testtt execution");
 
-                cudaMemcpy(&h_final, t_node->d_tree_node_chain_offset+1+1, sizeof(int), cudaMemcpyDeviceToHost);
 
-                printf("%d ", h_final);
-                printf("\n");
 
                 ///將node->d_tree_node_chain_offset＝0的node->d_tree_node_chain_sid去掉，且把offset建立好
 
                 //標記 keep[i]
-//                blockSize = getOptimalBlockSize(node->d_tree_node_chain_offset_size);
-//                gridSize  = (node->d_tree_node_chain_offset_size + blockSize - 1)/blockSize;
-//                markKeepArray<<<gridSize, blockSize>>>(node->d_tree_node_chain_offset, d_keep, node->d_tree_node_chain_offset_size);
-//                cudaDeviceSynchronize();
-//                //對 keep 做 prefix-sum (exclusive) => keepScan
-//
-//                cudaMemcpy(d_keepScan, d_keep, node->d_tree_node_chain_offset_size*sizeof(int), cudaMemcpyDeviceToDevice);
-//
-//                prefixSumExclusiveLargeNoMalloc(d_keepScan, node->d_tree_node_chain_offset_size, d_prefixSumExclusiveLarge_blockSum, prefixSumExclusiveLarge_blocks);
-//
-//                int h_keepScanEnd=0, h_keepLast=0;
-//                cudaMemcpy(&h_keepScanEnd, d_keepScan+(node->d_tree_node_chain_offset_size-1), sizeof(int), cudaMemcpyDeviceToHost);
-//                cudaMemcpy(&h_keepLast,    d_keep+(node->d_tree_node_chain_offset_size-1),     sizeof(int), cudaMemcpyDeviceToHost);
-//                int validCount = h_keepScanEnd + h_keepLast;
-//
-//                //原地壓縮：compactInPlace，把 offset[i], sid[i] 搬到前方
-//                blockSize = getOptimalBlockSize(node->d_tree_node_chain_offset_size);
-//                gridSize  = (node->d_tree_node_chain_offset_size + blockSize - 1)/blockSize;
-//                compactInPlace<<<gridSize, blockSize>>>(
-//                        node->d_tree_node_chain_offset, node->d_tree_node_chain_sid,
-//                        d_keep, d_keepScan,
-//                        node->d_tree_node_chain_offset_size
-//                );
-//                cudaDeviceSynchronize();
+                blockSize = getOptimalBlockSize(node->d_tree_node_chain_offset_size);
+                gridSize  = (node->d_tree_node_chain_offset_size + blockSize - 1)/blockSize;
+                markKeepArray<<<gridSize, blockSize>>>(node->d_tree_node_chain_offset, d_keep, node->d_tree_node_chain_offset_size);
+                cudaDeviceSynchronize();
+                //對 keep 做 prefix-sum (exclusive) => keepScan
 
+                cudaMemcpy(d_keepScan, d_keep, node->d_tree_node_chain_offset_size*sizeof(int), cudaMemcpyDeviceToDevice);
+
+                prefixSumExclusiveLargeNoMalloc(d_keepScan, node->d_tree_node_chain_offset_size, d_prefixSumExclusiveLarge_blockSum, prefixSumExclusiveLarge_blocks);
+
+                int h_keepScanEnd=0, h_keepLast=0;
+                cudaMemcpy(&h_keepScanEnd, d_keepScan+(node->d_tree_node_chain_offset_size-1), sizeof(int), cudaMemcpyDeviceToHost);
+                cudaMemcpy(&h_keepLast,    d_keep+(node->d_tree_node_chain_offset_size-1),     sizeof(int), cudaMemcpyDeviceToHost);
+                int validCount = h_keepScanEnd + h_keepLast;
+
+                //原地壓縮：compactInPlace，把 offset[i], sid[i] 搬到前方
+                blockSize = getOptimalBlockSize(node->d_tree_node_chain_offset_size);
+                gridSize  = (node->d_tree_node_chain_offset_size + blockSize - 1)/blockSize;
+                compactInPlace<<<gridSize, blockSize>>>(
+                        node->d_tree_node_chain_offset, node->d_tree_node_chain_sid,
+                        d_keep, d_keepScan,
+                        node->d_tree_node_chain_offset_size
+                );
+                cudaDeviceSynchronize();
+
+                cout<<"pattern:"<<t_node->pattern<<"\n";
+                testtt<<<1,1>>>(node->d_tree_node_chain_offset,validCount);
+                checkCudaError(cudaPeekAtLastError(),    "testtt launch param");
+                checkCudaError(cudaDeviceSynchronize(),  "testtt execution");
+
+                cout<<"d_tree_node_chain_sid:"<<"\n";
+                testtt<<<1,1>>>(node->d_tree_node_chain_sid,validCount);
+                checkCudaError(cudaPeekAtLastError(),    "testtt launch param");
+                checkCudaError(cudaDeviceSynchronize(),  "testtt execution");
+
+                //建好新的(t')chain_sid＆chain_offset
+                node->d_tree_node_chain_sid_size = validCount;
+                node->d_tree_node_chain_offset_size = validCount+1;
+
+                d_tree_node_chain_sid_global_memory_index+=validCount;
+                d_tree_node_chain_offset_global_memory_index+=validCount+1;
+
+                prefixSumExclusiveLargeNoMalloc(node->d_tree_node_chain_offset, node->d_tree_node_chain_offset_size, d_prefixSumExclusiveLarge_blockSum, prefixSumExclusiveLarge_blocks);
+
+                cout<<"pattern:"<<t_node->pattern<<"\n";
+                testtt<<<1,1>>>(node->d_tree_node_chain_offset,node->d_tree_node_chain_offset_size);
+                checkCudaError(cudaPeekAtLastError(),    "testtt launch param");
+                checkCudaError(cudaDeviceSynchronize(),  "testtt execution");
+
+//                int *h_final = new int [validCount] ;
+//
+//                cudaMemcpy(&h_final, node->d_tree_node_chain_offset, validCount*sizeof(int), cudaMemcpyDeviceToHost);
+//
+//                for(int i=0;i<validCount;i++){
+//                    printf("%d ", h_final[i]);
+//
+//                }
+//                printf("\n");
 
 
 
@@ -3038,9 +3073,9 @@ int main() {
     auto start = std::chrono::high_resolution_clock::now();
 
     // 指定要讀取的檔案名稱
-    string filename = "YoochooseSmaller.txt";
+    //string filename = "YoochooseSmaller.txt";
     //string filename = "SIGN.txt";
-    //string filename = "Yoochoose.txt";
+    string filename = "Yoochoose.txt";
     ifstream file(filename);
     vector<string> lines;
 
@@ -3057,9 +3092,9 @@ int main() {
 //    cout<<test_max_seq;
     file.close(); // 關閉檔案
 
-    double threshold = 0.01;
+    //double threshold = 0.01;
     //double threshold = 0.017;
-    //double threshold = 0.00024;
+    double threshold = 0.00024;
 
     int minUtility = int(threshold * DBdata.DButility);
 
