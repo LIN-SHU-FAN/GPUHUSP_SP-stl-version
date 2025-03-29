@@ -1504,7 +1504,7 @@ __global__ void find_s_extension_project_num(int *d_tid,int * d_db_offsets,
 
 __global__ void testtt(int * tt_tree_node_chain_offset,int tt_tree_node_chain_offset_size
 ){
-    printf("tt_tree_node_chain_offset:");
+    //printf("tt_tree_node_chain_offset:");
     for(int i =0;i<tt_tree_node_chain_offset_size;i++){
         printf("%d ",tt_tree_node_chain_offset[i]);
     }
@@ -2971,11 +2971,12 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
                 cudaDeviceSynchronize();
 
                 cout<<"pattern:"<<t_node->pattern<<"\n";
+                cout<<"t\'_tree_node_chain_offset:"<<"\n";
                 testtt<<<1,1>>>(node->d_tree_node_chain_offset,validCount);
                 checkCudaError(cudaPeekAtLastError(),    "testtt launch param");
                 checkCudaError(cudaDeviceSynchronize(),  "testtt execution");
 
-                cout<<"d_tree_node_chain_sid:"<<"\n";
+                cout<<"t\'_tree_node_chain_sid:"<<"\n";
                 testtt<<<1,1>>>(node->d_tree_node_chain_sid,validCount);
                 checkCudaError(cudaPeekAtLastError(),    "testtt launch param");
                 checkCudaError(cudaDeviceSynchronize(),  "testtt execution");
@@ -2989,8 +2990,13 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 
                 prefixSumExclusiveLargeNoMalloc(node->d_tree_node_chain_offset, node->d_tree_node_chain_offset_size, d_prefixSumExclusiveLarge_blockSum, prefixSumExclusiveLarge_blocks);
 
-                cout<<"pattern:"<<t_node->pattern<<"\n";
+                cout<<"t\'_tree_node_chain_offset:\n";
                 testtt<<<1,1>>>(node->d_tree_node_chain_offset,node->d_tree_node_chain_offset_size);
+                checkCudaError(cudaPeekAtLastError(),    "testtt launch param");
+                checkCudaError(cudaDeviceSynchronize(),  "testtt execution");
+
+                cout<<"t_tree_node_chain_utility:\n";
+                testtt<<<1,1>>>(t_node->d_tree_node_chain_utility,t_node->d_tree_node_chain_size);
                 checkCudaError(cudaPeekAtLastError(),    "testtt launch param");
                 checkCudaError(cudaDeviceSynchronize(),  "testtt execution");
 
