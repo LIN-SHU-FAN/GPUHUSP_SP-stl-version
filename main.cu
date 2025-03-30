@@ -81,7 +81,6 @@ public:
     int *c_sid_len;//長度是c_item_len
     int max_c_sid_len;//c_sid_len最大值
     int **c_seq_len;//長度是c_item_len 寬度是c_sid_len
-    //int max_c_seq_len;//
     vector<int> max_c_seq_len;//每個item的最大instance
 
 
@@ -105,6 +104,8 @@ public:
     int d_tree_node_chain_size;
     int *d_tree_node_chain_instance;//存DB上的位置
     int *d_tree_node_chain_utility;//存utility
+    
+    int d_tree_node_chain_max_instance_len;//存投影在每個sid中instance數量最多的值 => 用來開block_Dim
 
     int d_tree_node_chain_offset_size;
     int *d_tree_node_chain_offset;//chain_offset
@@ -113,8 +114,12 @@ public:
     int *d_tree_node_chain_sid;//真正的sid
 
     int d_tree_node_chain_prefixMax_size;
-    int *d_tree_node_chain_prefixMax_utility;//此node的utility的prefixMax
+    //此node的utility的prefixMax 因為index=0~N 所以要加上chain上第一個投影點的instance才是實際instance
+    //例如 某pattern在s1的chain instance = [2,4,8] s1長度=10 也就是說prefixMax大小是10-2=8  prefixMax index = 0~7 => +2過後才是實際instance
+    int *d_tree_node_chain_prefixMax_utility;
 
+    int d_tree_node_chain_prefixMax_max_instance_len;//存prefixMax投影在每個sid中instance數量最多的值 => 用來開block_Dim
+    
     int d_tree_node_chain_prefixMax_offset_size;//應該=d_tree_node_chain_offset_size
     int *d_tree_node_chain_prefixMax_offset;//此node的prefixMax的offset
 
@@ -440,7 +445,7 @@ __global__ void count_chain_memory_size(int * __restrict__  d_sequence_len,
     for (int i = threadIdx.x; i < d_c_sid_len[blockIdx.x]; i += blockDim.x) {
         first_project = d_flat_single_item_chain[d_chain_offsets_level2[d_chain_offsets_level1[blockIdx.x] + i] + 0];//blockIdx.x對應item,i對應sid
         seq_len = d_sequence_len[d_flat_chain_sid[d_chain_sid_offsets[blockIdx.x]+i]];
-        n = seq_len - first_project - 1;
+        n = seq_len - first_project;
 
         n>1 ? n=(n+1)*n/2 : n=n;//梯形公式
 
@@ -1447,11 +1452,135 @@ __global__ void build_d_tree_node_chain_prefixMax_offset(int *d_tree_node_chain_
                                                          int *d_sequence_len,
                                                          int *d_tree_node_chain_prefixMax_offset){
     int idx = blockDim.x * blockIdx.x + threadIdx.x;
+
     int sequence_len = d_sequence_len[d_tree_node_chain_sid[idx]];
+
     int first_project = d_tree_node_chain_instance[d_tree_node_chain_offset[idx]+0];
+
+    //printf("sid:%d,sequence_len:%d,first_project:%d\n",d_tree_node_chain_sid[idx],sequence_len,first_project);
 
     d_tree_node_chain_prefixMax_offset[idx] = sequence_len-first_project;
 
+}
+
+
+__global__ void build_d_tree_node_chain_prefixMax_utility(int *d_tree_node_chain_instance,int *d_tree_node_chain_utility,int *d_tree_node_chain_offset,
+                                                          int *d_tree_node_chain_prefixMax_utility,int *d_tree_node_chain_prefixMax_offset){
+
+    int project_len = d_tree_node_chain_offset[blockIdx.x+1] - d_tree_node_chain_offset[blockIdx.x];
+    int first_project_index = d_tree_node_chain_instance[d_tree_node_chain_offset[blockIdx.x]];
+    
+    int prefixMax_index;
+    for (int i = threadIdx.x; i < project_len; i += blockDim.x) {
+        //此node的utility的prefixMax 因為index=0~N 所以要加上chain上第一個投影點的instance才是實際instance
+        //例如 某pattern在s1的chain instance = [2,4,8] s1長度=10 也就是說prefixMax大小是10-2=8  prefixMax index = 0~7 => +2過後才是實際instance
+        
+        prefixMax_index = d_tree_node_chain_instance[d_tree_node_chain_offset[blockIdx.x]+i];
+        prefixMax_index -= first_project_index;
+        
+        d_tree_node_chain_prefixMax_utility[d_tree_node_chain_prefixMax_offset[blockIdx.x]+prefixMax_index] = 
+                d_tree_node_chain_utility[d_tree_node_chain_offset[blockIdx.x]+i];
+        
+    }
+
+}
+
+// 使用 Hillis–Steele 方式平行計算子陣列的 prefix max (含自己)；
+// 做完之後再轉成不包含自己 (exclusive) 並寫回全域。
+//
+// 每個 block 負責一個子陣列 (offset[subArrId] 到 offset[subArrId+1]-1)。
+// 若該子陣列長度 > blockDim.x，則切成多個 chunk (一次最多處理 blockDim.x 個元素)。
+//
+// prefixMaxExcludingKernel <<<grid, block, smemSize = blockDim.x * 2 * sizeof(int)>>>
+
+__global__
+void prefixMaxExcludingKernel(const int* offset,
+                              const int* utility,
+                              int*       result,
+                              int        nSubArrays)
+{
+    int subArrId = blockIdx.x;
+    if (subArrId >= nSubArrays) return;
+
+    int start  = offset[subArrId];
+    int end    = offset[subArrId + 1];
+    int length = end - start;
+
+    // 動態配置 shared memory：sData + eData
+    extern __shared__ int sData[];
+    int* eData = &sData[blockDim.x]; // eData 跟在 sData 後面
+
+    // 子陣列的長度可能比 blockDim.x 大，因此分 chunk 來處理
+    int chunkCount = (length + blockDim.x - 1) / blockDim.x;
+
+    // prevMax 用來累積「前面所有 chunk」掃描到的最大值
+    int prevMax = 0;
+
+    for (int c = 0; c < chunkCount; c++)
+    {
+        // 這個 thread 負責的 global 索引
+        int i = c * blockDim.x + threadIdx.x;
+
+        // 1) 載入 chunk 資料到 sData
+        if (i < length) {
+            sData[threadIdx.x] = utility[start + i];
+        } else {
+            // 超出子陣列範圍，給 INT_MIN 不影響最終 max
+            sData[threadIdx.x] = INT_MIN;
+        }
+        __syncthreads();
+
+        // 2) 用 Hillis–Steele 方式計算「含自己」(inclusive) 的前綴最大值
+        //    時間複雜度 O(blockDim.x * log(blockDim.x))，但易於理解且不會「全部洗成同一值」。
+        for (int d = 1; d < blockDim.x; d <<= 1)
+        {
+            int idx  = threadIdx.x;
+            int temp = sData[idx];
+            int left = INT_MIN;
+
+            if (idx >= d) {
+                left = sData[idx - d];
+            }
+
+            __syncthreads();
+            // 取 max(temp, left)
+            if (left > temp) {
+                temp = left;
+            }
+
+            __syncthreads();
+            sData[idx] = temp;
+            __syncthreads();
+        }
+
+        // 走到這裡，sData[t] 已經是「從 chunk 的第一個元素到 sData[t]」的 inclusive prefix max。
+        // chunkMax 就是最後一個 thread 裡的值 (或最大索引的位置)
+        int chunkMax = sData[blockDim.x - 1];
+
+        // 3) 轉成 exclusive，並加上前面 chunk 的最大值 (prevMax)
+        int idx = threadIdx.x;
+        int val;
+        if (idx == 0) {
+            // 第一個元素的 exclusive prefix max = prevMax
+            val = prevMax;
+        } else {
+            // 其它元素 => max( prevMax, sData[idx - 1] )
+            val = max(prevMax, sData[idx - 1]);
+        }
+        eData[idx] = val;
+
+        __syncthreads();
+
+        // 4) 寫回全域陣列
+        if (i < length) {
+            result[start + i] = eData[idx];
+        }
+
+        // 5) 更新 prevMax，供下一個 chunk 延續
+        prevMax = max(prevMax, chunkMax);
+
+        __syncthreads();
+    }
 }
 
 
@@ -2738,6 +2867,14 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
     cudaMallocManaged(&chain_sid_start, sizeof(int));//用Unified Memory
     cudaMallocManaged(&chain_sid_len, sizeof(int));
 
+    int *max_prefixMax_instance;
+    cudaMallocManaged(&max_prefixMax_instance, sizeof(int));//用Unified Memory
+
+    int chain_prefixMax_size;
+
+    int *d_max_prefixMax_blockResults;///接收第一次reduce資料，之後可以重用
+    cudaMalloc(&d_max_prefixMax_blockResults, sizeof(int) * Gpu_Db.sid_len);
+
     ///預先配置prefixSumAndScatter需要用到的變數
     int totalOnes = 0;
 
@@ -2802,7 +2939,8 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
         checkCudaError(cudaDeviceSynchronize(),  "get_chain_start_len execution");
         //cout<<single_item<<":"<<*chain_instance_start<<" "<<*chain_instance_len<<endl;
 
-
+        node->d_tree_node_chain_max_instance_len=Gpu_Db.max_c_seq_len[single_item];
+        
         ///建構d_tree_node_chain_instance
         node->d_tree_node_chain_size = *chain_instance_len;
         ///這裡表示每個single節點都從0開始累計（後面index有處理好應該不用歸0）
@@ -2881,8 +3019,12 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 
 
         ///建構d_tree_node_chain_prefixMax_instance
+        //建構chain_prefixMax_offset
         node->d_tree_node_chain_prefixMax_offset_size = node->d_tree_node_chain_offset_size;
-        node->d_tree_node_chain_prefixMax_offset  = d_tree_node_chain_prefixMax_utility_offset_global_memory;//從0開始
+        node->d_tree_node_chain_prefixMax_offset  = d_tree_node_chain_prefixMax_utility_offset_global_memory;
+
+        d_tree_node_chain_prefixMax_utility_offset_global_memory_index=0;//從0開始
+        d_tree_node_chain_prefixMax_utility_offset_global_memory_index+=node->d_tree_node_chain_prefixMax_offset_size;
 
         //找投影點建立offset 先將offset空間用來存每個sid有多少個投影點 後面再弄成真的offset
         //node->d_tree_node_chain_sid_size或node->d_tree_node_chain_prefixMax_offset_size-1意思一樣
@@ -2898,10 +3040,106 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
         checkCudaError(cudaPeekAtLastError(),    "build_d_tree_node_chain_prefixMax_offset launch param");
         checkCudaError(cudaDeviceSynchronize(),  "build_d_tree_node_chain_prefixMax_offset execution");
 
-        cout<<"d_tree_node_chain_offset:\n";
-        testtt<<<1,1>>>(node->d_tree_node_chain_offset,node->d_tree_node_chain_offset_size-1);
+
+
+
+
+        ///建構d_tree_node_chain_prefixMax_max_instance_len =>拿暫時的offset來找最大值
+
+        // ===== 第一次呼叫 =====
+        // - blockSize 選擇 <= max_num_threads
+        // - 每個 block 負責 2*blockSize 個元素
+        // => blocksPerGrid = (n + blockSize*2 - 1) / (blockSize*2)
+        int blockSize = ((node->d_tree_node_chain_prefixMax_offset_size-1) < max_num_threads) ? (node->d_tree_node_chain_prefixMax_offset_size-1) : max_num_threads;
+        int blocksPerGrid = (Gpu_Db.c_item_len + blockSize * 2 - 1) / (blockSize * 2);
+
+        // 呼叫 Kernel
+        reduceMaxKernel<<<blocksPerGrid, blockSize, blockSize * sizeof(int)>>>(
+                node->d_tree_node_chain_prefixMax_offset,
+                d_max_prefixMax_blockResults,
+                Gpu_Db.c_item_len
+        );
+        checkCudaError(cudaPeekAtLastError(),    "reduceMaxKernel launch param");
+        checkCudaError(cudaDeviceSynchronize(),  "reduceMaxKernel execution");
+
+
+        // 現在 blockResults 裏面有 blocksPerGrid 個 block 的最大值
+        // 若 blocksPerGrid > 1，還需要繼續歸約
+        curSize = blocksPerGrid;
+        while(curSize > 1) {
+            int newBlockSize = (curSize < max_num_threads) ? curSize : max_num_threads;
+            int newBlocksPerGrid = (curSize + newBlockSize * 2 - 1) / (newBlockSize * 2);
+
+            reduceMaxKernel<<<newBlocksPerGrid, newBlockSize, newBlockSize * sizeof(int)>>>(
+                    d_max_prefixMax_blockResults,  // 輸入放這裡
+                    d_max_prefixMax_blockResults,  // 輸出也放這裡 (in-place)
+                    curSize
+            );
+            checkCudaError(cudaPeekAtLastError(),    "reduceMaxKernel launch param");
+            checkCudaError(cudaDeviceSynchronize(),  "reduceMaxKernel execution");
+
+            curSize = newBlocksPerGrid;
+        }
+
+
+        cudaMemcpy(&node->d_tree_node_chain_prefixMax_max_instance_len, d_max_prefixMax_blockResults, sizeof(int), cudaMemcpyDeviceToHost);
+
+        cout<<node->d_tree_node_chain_prefixMax_max_instance_len;
+
+
+
+
+        //將offset從([3,2,2])建立好([0,3,5,7])
+        //輸入的N是建立好的大小(大小＝4)
+        prefixSumExclusiveLargeNoMalloc(node->d_tree_node_chain_prefixMax_offset, node->d_tree_node_chain_prefixMax_offset_size, d_prefixSumExclusiveLarge_blockSum, prefixSumExclusiveLarge_blocks);
+        checkCudaError(cudaPeekAtLastError(),    "prefixSumExclusiveLargeNoMalloc launch param");
+        checkCudaError(cudaDeviceSynchronize(),  "prefixSumExclusiveLargeNoMalloc execution");
+
+        cout<<"d_tree_node_chain_prefixMax_offset:\n";
+        testtt<<<1,1>>>(node->d_tree_node_chain_prefixMax_offset,node->d_tree_node_chain_prefixMax_offset_size);
         checkCudaError(cudaPeekAtLastError(),    "testtt launch param");
         checkCudaError(cudaDeviceSynchronize(),  "testtt execution");
+//
+//        cout<<"d_tree_node_chain_offset:\n";
+//        testtt<<<1,1>>>(node->d_tree_node_chain_offset,node->d_tree_node_chain_offset_size);
+//        checkCudaError(cudaPeekAtLastError(),    "testtt launch param");
+//        checkCudaError(cudaDeviceSynchronize(),  "testtt execution");
+
+
+        //讀取node->d_tree_node_chain_prefixMax_offset[len-1]
+        CHECK_CUDA(cudaMemcpy(&chain_prefixMax_size,            // 目的地指標 (device)
+                              node->d_tree_node_chain_prefixMax_offset+node->d_tree_node_chain_prefixMax_offset_size-1,    // 來源指標 (device) + 偏移量
+                              sizeof(int),
+                              cudaMemcpyDeviceToHost
+        ));
+
+        //建構chain_prefixMax_utility
+        node->d_tree_node_chain_prefixMax_utility = d_tree_node_chain_prefixMax_utility_global_memory;
+        node->d_tree_node_chain_prefixMax_size = chain_prefixMax_size;
+
+        CHECK_CUDA(cudaMemset(node->d_tree_node_chain_prefixMax_utility, 0, node->d_tree_node_chain_prefixMax_size * sizeof(int)));
+        
+        d_tree_node_chain_prefixMax_utility_global_memory_index = 0;
+        d_tree_node_chain_prefixMax_utility_global_memory_index += chain_prefixMax_size;
+
+        blockSize = node->d_tree_node_chain_max_instance_len>max_num_threads ? max_num_threads : node->d_tree_node_chain_max_instance_len;
+        gridSize = node->d_tree_node_chain_prefixMax_offset_size-1;
+        
+        build_d_tree_node_chain_prefixMax_utility<<<gridSize,blockSize>>>(node->d_tree_node_chain_instance,node->d_tree_node_chain_utility,node->d_tree_node_chain_offset,
+                                                                          node->d_tree_node_chain_prefixMax_utility,node->d_tree_node_chain_prefixMax_offset
+                                                                          );
+        checkCudaError(cudaPeekAtLastError(),    "build_d_tree_node_chain_prefixMax_utility launch param");
+        checkCudaError(cudaDeviceSynchronize(),  "build_d_tree_node_chain_prefixMax_utility execution");
+
+
+
+//        blockSize = node->d_tree_node_chain_max_instance_len>max_num_threads ? max_num_threads : node->d_tree_node_chain_max_instance_len;
+//        gridSize = node->d_tree_node_chain_prefixMax_offset_size-1;
+//        prefixMaxExcludingKernel<<<gridSize,>>>(node->d_tree_node_chain_prefixMax_offset,node->d_tree_node_chain_prefixMax_utility,
+//                                                node->d_tree_node_chain_prefixMax_utility,node->d_tree_node_chain_prefixMax_offset_size-1
+//                                                );
+
+        
 
 
         ///建構single item i and s candidate
@@ -3049,6 +3287,8 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
                 //將offset從([3,2,2])建立好([0,3,5,7])
                 //輸入的N是建立好的大小(大小＝4)
                 prefixSumExclusiveLargeNoMalloc(node->d_tree_node_chain_offset, node->d_tree_node_chain_offset_size, d_prefixSumExclusiveLarge_blockSum, prefixSumExclusiveLarge_blocks);
+                checkCudaError(cudaPeekAtLastError(),    "prefixSumExclusiveLargeNoMalloc launch param");
+                checkCudaError(cudaDeviceSynchronize(),  "prefixSumExclusiveLargeNoMalloc execution");
 
                 cout<<"t\'_tree_node_chain_offset:\n";
                 testtt<<<1,1>>>(node->d_tree_node_chain_offset,node->d_tree_node_chain_offset_size);
@@ -3139,9 +3379,9 @@ int main() {
     auto start = std::chrono::high_resolution_clock::now();
 
     // 指定要讀取的檔案名稱
-    string filename = "YoochooseSmaller.txt";
+    //string filename = "YoochooseSmaller.txt";
     //string filename = "SIGN.txt";
-    //string filename = "Yoochoose.txt";
+    string filename = "Yoochoose.txt";
     ifstream file(filename);
     vector<string> lines;
 
@@ -3158,9 +3398,9 @@ int main() {
 //    cout<<test_max_seq;
     file.close(); // 關閉檔案
 
-    double threshold = 0.01;
+    //double threshold = 0.01;
     //double threshold = 0.017;
-    //double threshold = 0.00024;
+    double threshold = 0.00024;
 
     int minUtility = int(threshold * DBdata.DButility);
 
