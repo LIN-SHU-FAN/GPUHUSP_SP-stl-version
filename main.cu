@@ -113,6 +113,9 @@ public:
     int d_tree_node_chain_sid_size;
     int *d_tree_node_chain_sid;//真正的sid
 
+    int d_tree_parent_node_chain_sid_size;
+    int *d_tree_parent_node_chain_sid;//放父節點的index sid(假sid) => 可以用來查找上一層的資訊 就不用二元搜尋
+
     int d_tree_node_chain_prefixMax_size;
     //此node的utility的prefixMax 因為index=0~N 所以要加上chain上第一個投影點的instance才是實際instance
     //例如 某pattern在s1的chain instance = [2,4,8] s1長度=10 也就是說prefixMax大小是10-2=8  prefixMax index = 0~7 => +2過後才是實際instance
@@ -2810,8 +2813,9 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
     int *d_tree_node_chain_sid_global_memory;//裝chain_sid(真正的sid)
     cudaMalloc(&d_tree_node_chain_sid_global_memory, tree_node_chain_offset_max_memory * sizeof(int));
 
-
-
+    int d_tree_parent_node_chain_sid_index=0;//目前用多少空間(也是下一個node的起始位置)
+    int *d_tree_parent_node_chain_sid;//放父節點的index sid(假sid) => 可以用來查找上一層的資訊 就不用二元搜尋
+    cudaMalloc(&d_tree_parent_node_chain_sid, tree_node_chain_offset_max_memory * sizeof(int));
 
     //###################
     ///建樹上節點的i s list空間
@@ -2943,7 +2947,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
         
         ///建構d_tree_node_chain_instance
         node->d_tree_node_chain_size = *chain_instance_len;
-        ///這裡表示每個single節點都從0開始累計（後面index有處理好應該不用歸0）
+        //這裡表示每個single節點都從0開始累計（後面index有處理好應該不用歸0）
         d_tree_node_chain_global_memory_index = 0 ;
 
         d_tree_node_chain_global_memory_index += *chain_instance_len;
@@ -2957,7 +2961,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 
         ///建構d_tree_node_chain_offset
         node->d_tree_node_chain_offset_size = *chain_offset_len;
-        ///這裡表示每個single節點都從0開始累計（後面index有處理好應該不用歸0）
+        //這裡表示每個single節點都從0開始累計（後面index有處理好應該不用歸0）
         d_tree_node_chain_offset_global_memory_index = 0;
 
         d_tree_node_chain_offset_global_memory_index += *chain_offset_len;
@@ -2986,7 +2990,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 
         ///建構d_tree_node_chain_sid
         node->d_tree_node_chain_sid_size = *chain_sid_len;
-        ///這裡表示每個single節點都從0開始累計（後面index有處理好應該不用歸0）
+        //這裡表示每個single節點都從0開始累計（後面index有處理好應該不用歸0）
         d_tree_node_chain_sid_global_memory_index = 0;
 
         d_tree_node_chain_sid_global_memory_index += *chain_sid_len;
@@ -2997,6 +3001,13 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
                               *chain_sid_len * sizeof(int),
                               cudaMemcpyDeviceToDevice
         ));
+
+        ///建構d_tree_parent_node_chain_sid(因為第一層沒有前一層所以都是0)
+        
+        //這裡表示每個single節點都從0開始累計（後面index有處理好應該不用歸0）
+        d_tree_parent_node_chain_sid_index=0;
+        node->d_tree_parent_node_chain_sid = d_tree_parent_node_chain_sid;
+        node->d_tree_parent_node_chain_sid_size = 0;
 
         ///建構d_tree_node_chain_utility
         node->d_tree_node_chain_utility = d_tree_node_chain_utility_global_memory;
@@ -3017,7 +3028,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
                        node->d_tree_node_chain_sid,node->d_tree_node_chain_sid_size);
         cudaDeviceSynchronize();
 
-
+        ///到這邊是後面生節點時也要新增的
         ///建構d_tree_node_chain_prefixMax_instance
         //建構chain_prefixMax_offset
         node->d_tree_node_chain_prefixMax_offset_size = node->d_tree_node_chain_offset_size;
@@ -3040,7 +3051,10 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
         checkCudaError(cudaPeekAtLastError(),    "build_d_tree_node_chain_prefixMax_offset launch param");
         checkCudaError(cudaDeviceSynchronize(),  "build_d_tree_node_chain_prefixMax_offset execution");
 
-
+//        cout<<"node->d_tree_node_chain_prefixMax_offset:\n";
+//        testtt<<<1,1>>>(node->d_tree_node_chain_prefixMax_offset,node->d_tree_node_chain_prefixMax_offset_size-1);
+//        checkCudaError(cudaPeekAtLastError(),    "testtt launch param");
+//        checkCudaError(cudaDeviceSynchronize(),  "testtt execution");
 
 
 
@@ -3084,9 +3098,9 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 
         cudaMemcpy(&node->d_tree_node_chain_prefixMax_max_instance_len, d_max_prefixMax_blockResults, sizeof(int), cudaMemcpyDeviceToHost);
 
-        cout<<node->d_tree_node_chain_prefixMax_max_instance_len;
+        //cout<<node->d_tree_node_chain_prefixMax_max_instance_len;
 
-
+        //明天確定一下這裡有沒有對
 
 
         //將offset從([3,2,2])建立好([0,3,5,7])
@@ -3095,10 +3109,10 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
         checkCudaError(cudaPeekAtLastError(),    "prefixSumExclusiveLargeNoMalloc launch param");
         checkCudaError(cudaDeviceSynchronize(),  "prefixSumExclusiveLargeNoMalloc execution");
 
-        cout<<"d_tree_node_chain_prefixMax_offset:\n";
-        testtt<<<1,1>>>(node->d_tree_node_chain_prefixMax_offset,node->d_tree_node_chain_prefixMax_offset_size);
-        checkCudaError(cudaPeekAtLastError(),    "testtt launch param");
-        checkCudaError(cudaDeviceSynchronize(),  "testtt execution");
+//        cout<<"d_tree_node_chain_prefixMax_offset:\n";
+//        testtt<<<1,1>>>(node->d_tree_node_chain_prefixMax_offset,node->d_tree_node_chain_prefixMax_offset_size);
+//        checkCudaError(cudaPeekAtLastError(),    "testtt launch param");
+//        checkCudaError(cudaDeviceSynchronize(),  "testtt execution");
 //
 //        cout<<"d_tree_node_chain_offset:\n";
 //        testtt<<<1,1>>>(node->d_tree_node_chain_offset,node->d_tree_node_chain_offset_size);
@@ -3131,14 +3145,29 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
         checkCudaError(cudaPeekAtLastError(),    "build_d_tree_node_chain_prefixMax_utility launch param");
         checkCudaError(cudaDeviceSynchronize(),  "build_d_tree_node_chain_prefixMax_utility execution");
 
+//        cout<<"d_tree_node_chain_utility:\n";
+//        testtt<<<1,1>>>(node->d_tree_node_chain_utility,node->d_tree_node_chain_size);
+//        checkCudaError(cudaPeekAtLastError(),    "testtt launch param");
+//        checkCudaError(cudaDeviceSynchronize(),  "testtt execution");
+//
+//        cout<<"d_tree_node_chain_prefixMax_utility:\n";
+//        testtt<<<1,1>>>(node->d_tree_node_chain_prefixMax_utility,node->d_tree_node_chain_prefixMax_size);
+//        checkCudaError(cudaPeekAtLastError(),    "testtt launch param");
+//        checkCudaError(cudaDeviceSynchronize(),  "testtt execution");
 
 
-//        blockSize = node->d_tree_node_chain_max_instance_len>max_num_threads ? max_num_threads : node->d_tree_node_chain_max_instance_len;
-//        gridSize = node->d_tree_node_chain_prefixMax_offset_size-1;
-//        prefixMaxExcludingKernel<<<gridSize,>>>(node->d_tree_node_chain_prefixMax_offset,node->d_tree_node_chain_prefixMax_utility,
-//                                                node->d_tree_node_chain_prefixMax_utility,node->d_tree_node_chain_prefixMax_offset_size-1
-//                                                );
+        blockSize = node->d_tree_node_chain_prefixMax_max_instance_len>max_num_threads ? max_num_threads : node->d_tree_node_chain_prefixMax_max_instance_len;
+        gridSize = node->d_tree_node_chain_prefixMax_offset_size-1;
+        prefixMaxExcludingKernel<<<gridSize,blockSize,blockSize*2*sizeof(int)>>>(node->d_tree_node_chain_prefixMax_offset,node->d_tree_node_chain_prefixMax_utility,
+                                                node->d_tree_node_chain_prefixMax_utility,node->d_tree_node_chain_prefixMax_offset_size-1
+                                                );
+        checkCudaError(cudaPeekAtLastError(),    "prefixMaxExcludingKernel launch param");
+        checkCudaError(cudaDeviceSynchronize(),  "prefixMaxExcludingKernel execution");
 
+//        cout<<"d_tree_node_chain_prefixMax_utility:\n";
+//        testtt<<<1,1>>>(node->d_tree_node_chain_prefixMax_utility,node->d_tree_node_chain_prefixMax_size);
+//        checkCudaError(cudaPeekAtLastError(),    "testtt launch param");
+//        checkCudaError(cudaDeviceSynchronize(),  "testtt execution");
         
 
 
@@ -3157,10 +3186,10 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
         std::vector<int> hB(totalOnes);
         CHECK_CUDA(cudaMemcpy(hB.data(), d_tree_node_s_list_global_memory, totalOnes * sizeof(int), cudaMemcpyDeviceToHost));
 
-        std::cout <<single_item<<":";
-        std::cout << "B = [ ";
-        for (auto &x : hB) std::cout << x << " ";
-        std::cout << "]\n";
+//        std::cout <<single_item<<":";
+//        std::cout << "B = [ ";
+//        for (auto &x : hB) std::cout << x << " ";
+//        std::cout << "]\n";
 
         prefixSumAndScatter(d_single_item_i_candidate+single_item*Gpu_Db.c_item_len, d_tree_node_i_list_global_memory, d_Scan, Gpu_Db.c_item_len,prefixSumAndScatter_blockSize,prefixSumAndScatter_numBlocks,d_blockSums, totalOnes);
 
@@ -3175,12 +3204,13 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
         std::vector<int> hB_i(totalOnes);
         CHECK_CUDA(cudaMemcpy(hB_i.data(), d_tree_node_i_list_global_memory, totalOnes * sizeof(int), cudaMemcpyDeviceToHost));
 
-        std::cout <<single_item<<":";
-        std::cout << "B = [ ";
-        for (auto &x : hB_i) std::cout << x << " ";
-        std::cout << "]\n";
+//        std::cout <<single_item<<":";
+//        std::cout << "B = [ ";
+//        for (auto &x : hB_i) std::cout << x << " ";
+//        std::cout << "]\n";
 
-
+        
+        
         DFS_stack.push(node);
         //開始DFS
         while(!DFS_stack.empty()){
@@ -3207,7 +3237,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
                 node->d_tree_node_chain_offset = d_tree_node_chain_offset_global_memory + d_tree_node_chain_offset_global_memory_index;
                 node->d_tree_node_chain_offset_size = t_node->d_tree_node_chain_offset_size;
 
-                //找投影點建立offset 先將offset空間用來存每個sid有多少個投影點 後面再弄成真的offset
+                ///找投影點建立offset 先將offset空間用來存每個sid有多少個投影點 後面再弄成真的offset
                 blockSize = t_node->d_tree_node_chain_sid_size>max_num_threads?max_num_threads:t_node->d_tree_node_chain_sid_size;
                 gridSize = (t_node->d_tree_node_chain_sid_size + blockSize - 1) / blockSize;
 
@@ -3226,12 +3256,12 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 
 //                d_tree_node_chain_sid_global_memory_index += size_to_copy;
 
-                cout<<"pattern:"<<node->pattern<<"\n";
+                cout<<"node->d_tree_node_chain_offset:\n";
                 testtt<<<1,1>>>(node->d_tree_node_chain_offset,t_node->d_tree_node_chain_offset_size-1);
                 checkCudaError(cudaPeekAtLastError(),    "testtt launch param");
                 checkCudaError(cudaDeviceSynchronize(),  "testtt execution");
 
-                cout<<"d_tree_node_chain_sid:"<<"\n";
+                cout<<"node->d_tree_node_chain_sid\n";
                 testtt<<<1,1>>>(node->d_tree_node_chain_sid,node->d_tree_node_chain_sid_size);
                 checkCudaError(cudaPeekAtLastError(),    "testtt launch param");
                 checkCudaError(cudaDeviceSynchronize(),  "testtt execution");
