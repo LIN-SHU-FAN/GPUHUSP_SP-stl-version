@@ -1406,7 +1406,8 @@ __device__ int upper_bound_in_thread(const int* arr, int size, int key)
 
 
 // 建構d_tree_node的utility
-__global__ void build_d_tree_node_chain_utility(int *d_tree_node_chain_instance,
+__global__ void build_d_tree_node_chain_utility(int Chain_instance_len,
+                                                int *d_tree_node_chain_instance,
                                                 int *d_tree_node_chain_offset,int offset_size,
                                                 int *d_tree_node_chain_sid,
                                                 int *d_iu,int *d_db_offsets,
@@ -1415,11 +1416,13 @@ __global__ void build_d_tree_node_chain_utility(int *d_tree_node_chain_instance,
 {
 
     int idx = blockIdx.x * blockDim.x + threadIdx.x ;
+    if(idx < Chain_instance_len){
+        int sid_index = upper_bound_in_thread(d_tree_node_chain_offset, offset_size, idx) - 1;
+        int sid = d_tree_node_chain_sid[sid_index];
 
-    int sid_index = upper_bound_in_thread(d_tree_node_chain_offset, offset_size, idx) - 1;
-    int sid = d_tree_node_chain_sid[sid_index];
+        d_tree_node_chain_utility[idx] = d_iu[d_db_offsets[sid]+d_tree_node_chain_instance[idx]];
+    }
 
-    d_tree_node_chain_utility[idx] = d_iu[d_db_offsets[sid]+d_tree_node_chain_instance[idx]];
 
 }
 
@@ -1449,21 +1452,22 @@ __global__ void testt(int * d_tree_node_chain_instance,int *d_tree_node_chain_ut
     printf("\n\n");
 }
 
-__global__ void build_d_tree_node_chain_prefixMax_offset(int *d_tree_node_chain_offset,
+__global__ void build_d_tree_node_chain_prefixMax_offset(int chain_sid_size,
+                                                         int *d_tree_node_chain_offset,
                                                          int *d_tree_node_chain_sid,
                                                          int *d_tree_node_chain_instance,
                                                          int *d_sequence_len,
                                                          int *d_tree_node_chain_prefixMax_offset){
     int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    if(idx<chain_sid_size){
+        int sequence_len = d_sequence_len[d_tree_node_chain_sid[idx]];
 
-    int sequence_len = d_sequence_len[d_tree_node_chain_sid[idx]];
+        int first_project = d_tree_node_chain_instance[d_tree_node_chain_offset[idx]+0];
 
-    int first_project = d_tree_node_chain_instance[d_tree_node_chain_offset[idx]+0];
+        //printf("sid:%d,sequence_len:%d,first_project:%d\n",d_tree_node_chain_sid[idx],sequence_len,first_project);
 
-    //printf("sid:%d,sequence_len:%d,first_project:%d\n",d_tree_node_chain_sid[idx],sequence_len,first_project);
-
-    d_tree_node_chain_prefixMax_offset[idx] = sequence_len-first_project;
-
+        d_tree_node_chain_prefixMax_offset[idx] = sequence_len-first_project;
+    }
 }
 
 
@@ -1586,6 +1590,12 @@ void prefixMaxExcludingKernel(const int* offset,
     }
 }
 
+__global__ void initArray(int* arr, int n) {
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+    if (idx < n) {
+        arr[idx] = idx;
+    }
+}
 
 __global__ void find_s_extension_project_num(int *d_tid,int * d_db_offsets,
                                              int *d_flat_indices_table,int *d_table_offsets_level1,int *d_table_offsets_level2,
@@ -1814,7 +1824,7 @@ void prefixSumExclusiveLargeNoMalloc(int *d_data, int N,
 
 
 __global__
-void compactInPlace(int *offset, int *sid,
+void compactInPlace(int *offset, int *sid,int *parent_node_chain_sid,
                     const int *keep, const int *keepScan,
                     int N)
 {
@@ -1825,6 +1835,7 @@ void compactInPlace(int *offset, int *sid,
             // 注意：keepScan[idx] <= idx，故不會破壞尚未讀取的資料
             offset[pos] = offset[idx];
             sid[pos]    = sid[idx];
+            parent_node_chain_sid[pos]   = parent_node_chain_sid[idx];
         }
     }
 }
@@ -2141,7 +2152,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
         max_c_sid_len_num_thread=Gpu_Db.max_c_sid_len;
     }
 
-    count_chain_memory_size<<<Gpu_Db.c_item_len,max_c_sid_len_num_thread>>>(d_sequence_len,
+    count_chain_memory_size<<<Gpu_Db.c_item_len,getOptimalBlockSize(max_c_sid_len_num_thread)>>>(d_sequence_len,
                                                                             d_flat_chain_sid,d_chain_sid_offsets,
                                                                             d_c_sid_len,
                                                                             d_flat_single_item_chain,d_chain_offsets_level1,d_chain_offsets_level2,
@@ -2166,7 +2177,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
     // - blockSize 選擇 <= max_num_threads
     // - 每個 block 負責 2*blockSize 個元素
     // => blocksPerGrid = (n + blockSize*2 - 1) / (blockSize*2)
-    int blockSize = (Gpu_Db.c_item_len < max_num_threads) ? Gpu_Db.c_item_len : max_num_threads;
+    int blockSize = getOptimalBlockSize((Gpu_Db.c_item_len < max_num_threads) ? Gpu_Db.c_item_len : max_num_threads);
     int blocksPerGrid = (Gpu_Db.c_item_len + blockSize * 2 - 1) / (blockSize * 2);
 
     // 呼叫 Kernel
@@ -2214,7 +2225,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
     int *d_max_n;//將max_n記起來，之後算i list、s list空間的時候用的到
     cudaMalloc(&d_max_n,Gpu_Db.c_item_len * sizeof(int));
 
-    count_chain_offset_size<<<Gpu_Db.c_item_len,max_c_sid_len_num_thread>>>(d_sequence_len,
+    count_chain_offset_size<<<Gpu_Db.c_item_len,getOptimalBlockSize(max_c_sid_len_num_thread)>>>(d_sequence_len,
                                                                             d_flat_chain_sid,d_chain_sid_offsets,
                                                                             d_flat_single_item_chain,d_chain_offsets_level1,d_chain_offsets_level2,
                                                                             d_c_sid_len,
@@ -2236,7 +2247,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
     // - blockSize 選擇 <= max_num_threads
     // - 每個 block 負責 2*blockSize 個元素
     // => blocksPerGrid = (n + blockSize*2 - 1) / (blockSize*2)
-    blockSize = (Gpu_Db.c_item_len < max_num_threads) ? Gpu_Db.c_item_len : max_num_threads;
+    blockSize = getOptimalBlockSize((Gpu_Db.c_item_len < max_num_threads) ? Gpu_Db.c_item_len : max_num_threads);
     blocksPerGrid = (Gpu_Db.c_item_len + blockSize * 2 - 1) / (blockSize * 2);
 
     // 呼叫 Kernel
@@ -2309,7 +2320,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
     cudaMalloc(&d_TSU_bool, chain_sid_num * sizeof(bool));
 
     auto max_it = std::max_element(Gpu_Db.max_c_seq_len.begin(), Gpu_Db.max_c_seq_len.end());
-    int block_size=max_num_threads>*max_it?*max_it:max_num_threads;
+    int block_size=getOptimalBlockSize(max_num_threads>*max_it?*max_it:max_num_threads);
 
     //將chain上每個item中所有seq上投影點找出各自的最大值
     single_item_peu_utility_count_max<<<chain_sid_num,block_size>>>(Gpu_Db.c_item_len,
@@ -2368,7 +2379,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
     cudaMemset(d_chain_single_item_peu_bool, 0,  Gpu_Db.c_item_len * sizeof(bool));
 
 
-    block_size=max_num_threads>Gpu_Db.max_c_sid_len?Gpu_Db.max_c_sid_len:max_num_threads;
+    block_size=getOptimalBlockSize(max_num_threads>Gpu_Db.max_c_sid_len?Gpu_Db.max_c_sid_len:max_num_threads);
 
 
     single_item_peu_utility_count<<<Gpu_Db.c_item_len,block_size>>>(d_chain_sid_num_peu,
@@ -2452,7 +2463,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
     cudaMalloc(&d_single_item_i_candidate_TSU_chain_sid_num, sid_num* Gpu_Db.c_item_len * sizeof(int));
     cudaMemset(d_single_item_i_candidate_TSU_chain_sid_num, 0, sid_num * Gpu_Db.c_item_len * sizeof(int));
 
-    block_size=max_num_threads>max_table_item_len?max_table_item_len:max_num_threads;
+    block_size=getOptimalBlockSize(max_num_threads>max_table_item_len?max_table_item_len:max_num_threads);
 
 
     count_single_item_s_candidate<<<sid_num,block_size>>>(Gpu_Db.c_item_len,
@@ -2488,7 +2499,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 //    }
     max_it = std::max_element(Gpu_Db.max_c_seq_len.begin(), Gpu_Db.max_c_seq_len.end());
 
-    block_size=max_num_threads>*max_it?*max_it:max_num_threads;
+    block_size=getOptimalBlockSize(max_num_threads>*max_it?*max_it:max_num_threads);
 
     count_single_item_i_candidate<<<sid_num,block_size>>>(Gpu_Db.c_item_len,
                                                           d_sid_map_item,
@@ -2556,7 +2567,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 //    }
 
     int gridSize = int(flat_c_seq_len.size());
-    blockSize = Gpu_Db.c_item_len > max_num_threads ? max_num_threads : Gpu_Db.c_item_len;
+    blockSize = getOptimalBlockSize(Gpu_Db.c_item_len > max_num_threads ? max_num_threads : Gpu_Db.c_item_len);
     ///聚合d_single_item_i_candidate_TSU_chain_sid_num
     sum_i_candidate_TSU_chain_sid_num_Segments_LargeN<<<gridSize,blockSize>>>(d_single_item_i_candidate_TSU_chain_sid_num,
                                                             d_c_seq_len_offsets,
@@ -2578,7 +2589,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 //    }
 
     ///將i和s candidate用TSU砍掉沒過門檻的candidate
-    blockSize = Gpu_Db.c_item_len > max_num_threads ? max_num_threads : Gpu_Db.c_item_len;
+    blockSize = getOptimalBlockSize(Gpu_Db.c_item_len > max_num_threads ? max_num_threads : Gpu_Db.c_item_len);
     single_item_TSU_pruning<<<Gpu_Db.c_item_len,blockSize>>>(minUtility,
                                                              Gpu_Db.c_item_len,
                                                              d_single_item_i_candidate,
@@ -2613,7 +2624,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
     gridSize = Gpu_Db.c_item_len;
 
     // blockSize 根據 n 來簡單選擇「最小的 1024 與 n 」，也可加更複雜的「最佳化」邏輯
-    blockSize = (Gpu_Db.c_item_len < max_num_threads) ? Gpu_Db.c_item_len : max_num_threads;
+    blockSize = getOptimalBlockSize((Gpu_Db.c_item_len < max_num_threads) ? Gpu_Db.c_item_len : max_num_threads);
 
     // 動態 shared memory 大小
     size_t smemSize = blockSize * sizeof(int);
@@ -2654,7 +2665,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 //    }
 //    cout<<endl;
 
-    blockSize = (Gpu_Db.c_item_len < max_num_threads) ? Gpu_Db.c_item_len : max_num_threads;
+    blockSize = getOptimalBlockSize((Gpu_Db.c_item_len < max_num_threads) ? Gpu_Db.c_item_len : max_num_threads);
     gridSize = (Gpu_Db.c_item_len + (blockSize - 1))/blockSize;
     Arr_Multiplication<<<gridSize,blockSize>>>(d_single_item_s_candidate_sum,d_max_n,Gpu_Db.c_item_len);
     Arr_Multiplication<<<gridSize,blockSize>>>(d_single_item_i_candidate_sum,d_max_n,Gpu_Db.c_item_len);
@@ -2680,7 +2691,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
     // - blockSize 選擇 <= max_num_threads
     // - 每個 block 負責 2*blockSize 個元素
     // => blocksPerGrid = (n + blockSize*2 - 1) / (blockSize*2)
-    blockSize = (Gpu_Db.c_item_len < max_num_threads) ? Gpu_Db.c_item_len : max_num_threads;
+    blockSize = getOptimalBlockSize((Gpu_Db.c_item_len < max_num_threads) ? Gpu_Db.c_item_len : max_num_threads);
     blocksPerGrid = (Gpu_Db.c_item_len + blockSize * 2 - 1) / (blockSize * 2);
 
     int *d_s_candidate_blockResults;
@@ -2876,8 +2887,8 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 
     int chain_prefixMax_size;
 
-    int *d_max_prefixMax_blockResults;///接收第一次reduce資料，之後可以重用
-    cudaMalloc(&d_max_prefixMax_blockResults, sizeof(int) * Gpu_Db.sid_len);
+    int *d_max_blockResults;///接收第一次reduce資料，之後可以重用
+    cudaMalloc(&d_max_blockResults, sizeof(int) * Gpu_Db.sid_len);
 
     ///預先配置prefixSumAndScatter需要用到的變數
     int totalOnes = 0;
@@ -3003,7 +3014,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
         ));
 
         ///建構d_tree_parent_node_chain_sid(因為第一層沒有前一層所以都是0)
-        
+
         //這裡表示每個single節點都從0開始累計（後面index有處理好應該不用歸0）
         d_tree_parent_node_chain_sid_index=0;
         node->d_tree_parent_node_chain_sid = d_tree_parent_node_chain_sid;
@@ -3011,9 +3022,10 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 
         ///建構d_tree_node_chain_utility
         node->d_tree_node_chain_utility = d_tree_node_chain_utility_global_memory;
-        blockSize = *chain_instance_len>max_num_threads?max_num_threads:*chain_instance_len;
+        blockSize = getOptimalBlockSize(*chain_instance_len>max_num_threads?max_num_threads:*chain_instance_len);
         gridSize = (*chain_instance_len + blockSize - 1) / blockSize;
-        build_d_tree_node_chain_utility<<<gridSize, blockSize>>>(node->d_tree_node_chain_instance,
+        build_d_tree_node_chain_utility<<<gridSize, blockSize>>>(*chain_instance_len,
+                                                                 node->d_tree_node_chain_instance,
                                                                  node->d_tree_node_chain_offset,node->d_tree_node_chain_offset_size,
                                                                  node->d_tree_node_chain_sid,
                                                                  d_iu,d_db_offsets,
@@ -3039,10 +3051,11 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 
         //找投影點建立offset 先將offset空間用來存每個sid有多少個投影點 後面再弄成真的offset
         //node->d_tree_node_chain_sid_size或node->d_tree_node_chain_prefixMax_offset_size-1意思一樣
-        blockSize = node->d_tree_node_chain_sid_size>max_num_threads?max_num_threads:node->d_tree_node_chain_sid_size;
+        blockSize = getOptimalBlockSize(node->d_tree_node_chain_sid_size>max_num_threads?max_num_threads:node->d_tree_node_chain_sid_size);
         gridSize = (node->d_tree_node_chain_sid_size + blockSize - 1) / blockSize;
 
-        build_d_tree_node_chain_prefixMax_offset<<<gridSize,blockSize>>>(node->d_tree_node_chain_offset,
+        build_d_tree_node_chain_prefixMax_offset<<<gridSize,blockSize>>>(node->d_tree_node_chain_sid_size,
+                                                                         node->d_tree_node_chain_offset,
                                                                          node->d_tree_node_chain_sid,
                                                                          node->d_tree_node_chain_instance,
                                                                          d_sequence_len,
@@ -3064,14 +3077,14 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
         // - blockSize 選擇 <= max_num_threads
         // - 每個 block 負責 2*blockSize 個元素
         // => blocksPerGrid = (n + blockSize*2 - 1) / (blockSize*2)
-        int blockSize = ((node->d_tree_node_chain_prefixMax_offset_size-1) < max_num_threads) ? (node->d_tree_node_chain_prefixMax_offset_size-1) : max_num_threads;
-        int blocksPerGrid = (Gpu_Db.c_item_len + blockSize * 2 - 1) / (blockSize * 2);
+        int blockSize = getOptimalBlockSize(((node->d_tree_node_chain_prefixMax_offset_size-1) < max_num_threads) ? (node->d_tree_node_chain_prefixMax_offset_size-1) : max_num_threads);
+        int blocksPerGrid = ((node->d_tree_node_chain_prefixMax_offset_size-1) + blockSize * 2 - 1) / (blockSize * 2);
 
         // 呼叫 Kernel
         reduceMaxKernel<<<blocksPerGrid, blockSize, blockSize * sizeof(int)>>>(
                 node->d_tree_node_chain_prefixMax_offset,
-                d_max_prefixMax_blockResults,
-                Gpu_Db.c_item_len
+                d_max_blockResults,
+                node->d_tree_node_chain_prefixMax_offset_size-1
         );
         checkCudaError(cudaPeekAtLastError(),    "reduceMaxKernel launch param");
         checkCudaError(cudaDeviceSynchronize(),  "reduceMaxKernel execution");
@@ -3085,8 +3098,8 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
             int newBlocksPerGrid = (curSize + newBlockSize * 2 - 1) / (newBlockSize * 2);
 
             reduceMaxKernel<<<newBlocksPerGrid, newBlockSize, newBlockSize * sizeof(int)>>>(
-                    d_max_prefixMax_blockResults,  // 輸入放這裡
-                    d_max_prefixMax_blockResults,  // 輸出也放這裡 (in-place)
+                    d_max_blockResults,  // 輸入放這裡
+                    d_max_blockResults,  // 輸出也放這裡 (in-place)
                     curSize
             );
             checkCudaError(cudaPeekAtLastError(),    "reduceMaxKernel launch param");
@@ -3096,11 +3109,11 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
         }
 
 
-        cudaMemcpy(&node->d_tree_node_chain_prefixMax_max_instance_len, d_max_prefixMax_blockResults, sizeof(int), cudaMemcpyDeviceToHost);
+        cudaMemcpy(&node->d_tree_node_chain_prefixMax_max_instance_len, d_max_blockResults, sizeof(int), cudaMemcpyDeviceToHost);
 
         //cout<<node->d_tree_node_chain_prefixMax_max_instance_len;
 
-        //明天確定一下這裡有沒有對
+
 
 
         //將offset從([3,2,2])建立好([0,3,5,7])
@@ -3136,7 +3149,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
         d_tree_node_chain_prefixMax_utility_global_memory_index = 0;
         d_tree_node_chain_prefixMax_utility_global_memory_index += chain_prefixMax_size;
 
-        blockSize = node->d_tree_node_chain_max_instance_len>max_num_threads ? max_num_threads : node->d_tree_node_chain_max_instance_len;
+        blockSize = getOptimalBlockSize(node->d_tree_node_chain_max_instance_len>max_num_threads ? max_num_threads : node->d_tree_node_chain_max_instance_len);
         gridSize = node->d_tree_node_chain_prefixMax_offset_size-1;
         
         build_d_tree_node_chain_prefixMax_utility<<<gridSize,blockSize>>>(node->d_tree_node_chain_instance,node->d_tree_node_chain_utility,node->d_tree_node_chain_offset,
@@ -3156,7 +3169,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 //        checkCudaError(cudaDeviceSynchronize(),  "testtt execution");
 
 
-        blockSize = node->d_tree_node_chain_prefixMax_max_instance_len>max_num_threads ? max_num_threads : node->d_tree_node_chain_prefixMax_max_instance_len;
+        blockSize = getOptimalBlockSize(node->d_tree_node_chain_prefixMax_max_instance_len>max_num_threads ? max_num_threads : node->d_tree_node_chain_prefixMax_max_instance_len);
         gridSize = node->d_tree_node_chain_prefixMax_offset_size-1;
         prefixMaxExcludingKernel<<<gridSize,blockSize,blockSize*2*sizeof(int)>>>(node->d_tree_node_chain_prefixMax_offset,node->d_tree_node_chain_prefixMax_utility,
                                                 node->d_tree_node_chain_prefixMax_utility,node->d_tree_node_chain_prefixMax_offset_size-1
@@ -3209,8 +3222,8 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 //        for (auto &x : hB_i) std::cout << x << " ";
 //        std::cout << "]\n";
 
-        
-        
+
+
         DFS_stack.push(node);
         //開始DFS
         while(!DFS_stack.empty()){
@@ -3223,22 +3236,40 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
                 //cout<<"extension_item:"<<extension_item<<"\n";
                 node->pattern = t_node->pattern + ","+ to_string(extension_item);
 
+                ///建構t'的parent_node_chain_sid（父節點的sid index）
+                node->d_tree_parent_node_chain_sid = d_tree_parent_node_chain_sid + d_tree_parent_node_chain_sid_index;
+                node->d_tree_parent_node_chain_sid_size = t_node->d_tree_node_chain_sid_size;//暫時的 之後要壓縮
+
+                blockSize = getOptimalBlockSize(node->d_tree_parent_node_chain_sid_size>max_num_threads?max_num_threads:node->d_tree_parent_node_chain_sid_size);
+                gridSize = (node->d_tree_parent_node_chain_sid_size + blockSize - 1) / blockSize;
+
+                initArray<<<gridSize, blockSize>>>(node->d_tree_parent_node_chain_sid, node->d_tree_parent_node_chain_sid_size);
+                checkCudaError(cudaPeekAtLastError(),    "initArray launch param");
+                checkCudaError(cudaDeviceSynchronize(),  "initArray execution");
+
+                cout<<"node->d_tree_parent_node_chain_sid:\n";
+                testtt<<<1,1>>>(node->d_tree_parent_node_chain_sid,node->d_tree_parent_node_chain_sid_size);
+                checkCudaError(cudaPeekAtLastError(),    "testtt launch param");
+                checkCudaError(cudaDeviceSynchronize(),  "testtt execution");
+
+
+                ///建構t'的chain_sid、offset
                 //要加上偏移量
                 node->d_tree_node_chain_sid = d_tree_node_chain_sid_global_memory + d_tree_node_chain_sid_global_memory_index;
-
-                //把父節點的offset直接搬過來
+                node->d_tree_node_chain_sid_size = t_node->d_tree_node_chain_sid_size;//暫時的 之後要壓縮
+                //把父節點的sid直接搬過來
                 CHECK_CUDA(cudaMemcpy(node->d_tree_node_chain_sid,
                                       t_node->d_tree_node_chain_sid,
                                       t_node->d_tree_node_chain_sid_size * sizeof(int),
                                       cudaMemcpyDeviceToDevice));
 
-                node->d_tree_node_chain_sid_size = t_node->d_tree_node_chain_sid_size;
+
 
                 node->d_tree_node_chain_offset = d_tree_node_chain_offset_global_memory + d_tree_node_chain_offset_global_memory_index;
-                node->d_tree_node_chain_offset_size = t_node->d_tree_node_chain_offset_size;
+                node->d_tree_node_chain_offset_size = t_node->d_tree_node_chain_offset_size;//暫時的 之後要壓縮
 
                 ///找投影點建立offset 先將offset空間用來存每個sid有多少個投影點 後面再弄成真的offset
-                blockSize = t_node->d_tree_node_chain_sid_size>max_num_threads?max_num_threads:t_node->d_tree_node_chain_sid_size;
+                blockSize = getOptimalBlockSize(t_node->d_tree_node_chain_sid_size>max_num_threads?max_num_threads:t_node->d_tree_node_chain_sid_size);
                 gridSize = (t_node->d_tree_node_chain_sid_size + blockSize - 1) / blockSize;
 
 
@@ -3290,7 +3321,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
                 blockSize = getOptimalBlockSize(node->d_tree_node_chain_offset_size);
                 gridSize  = (node->d_tree_node_chain_offset_size + blockSize - 1)/blockSize;
                 compactInPlace<<<gridSize, blockSize>>>(
-                        node->d_tree_node_chain_offset, node->d_tree_node_chain_sid,
+                        node->d_tree_node_chain_offset, node->d_tree_node_chain_sid,node->d_tree_parent_node_chain_sid,
                         d_keep, d_keepScan,
                         node->d_tree_node_chain_offset_size
                 );
@@ -3307,12 +3338,62 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
                 checkCudaError(cudaPeekAtLastError(),    "testtt launch param");
                 checkCudaError(cudaDeviceSynchronize(),  "testtt execution");
 
+                cout<<"t\'_tree_parent_node_chain_sid:"<<"\n";
+                testtt<<<1,1>>>(node->d_tree_parent_node_chain_sid,validCount);
+                checkCudaError(cudaPeekAtLastError(),    "testtt launch param");
+                checkCudaError(cudaDeviceSynchronize(),  "testtt execution");
+
                 //建好新的(t')chain_sid＆chain_offset
                 node->d_tree_node_chain_sid_size = validCount;
+                node->d_tree_parent_node_chain_sid_size = validCount;
                 node->d_tree_node_chain_offset_size = validCount+1;
 
                 d_tree_node_chain_sid_global_memory_index+=validCount;
+                d_tree_parent_node_chain_sid_index+=validCount;
                 d_tree_node_chain_offset_global_memory_index+=validCount+1;
+
+                
+                ///offset做max=>開kernel要用  d_tree_node_chain_max_instance_len
+                ///d_tree_node_chain_max_instance_len =>拿暫時的offset來找最大值
+
+                // ===== 第一次呼叫 =====
+                // - blockSize 選擇 <= max_num_threads
+                // - 每個 block 負責 2*blockSize 個元素
+                // => blocksPerGrid = (n + blockSize*2 - 1) / (blockSize*2)
+                int blockSize = getOptimalBlockSize(((node->d_tree_node_chain_offset_size-1) < max_num_threads) ? (node->d_tree_node_chain_offset_size-1) : max_num_threads);
+                int blocksPerGrid = ((node->d_tree_node_chain_offset_size-1) + blockSize * 2 - 1) / (blockSize * 2);
+
+                // 呼叫 Kernel
+                reduceMaxKernel<<<blocksPerGrid, blockSize, blockSize * sizeof(int)>>>(
+                        node->d_tree_node_chain_offset,
+                        d_max_blockResults,
+                        node->d_tree_node_chain_offset_size-1
+                );
+                checkCudaError(cudaPeekAtLastError(),    "reduceMaxKernel launch param");
+                checkCudaError(cudaDeviceSynchronize(),  "reduceMaxKernel execution");
+
+
+                // 現在 blockResults 裏面有 blocksPerGrid 個 block 的最大值
+                // 若 blocksPerGrid > 1，還需要繼續歸約
+                curSize = blocksPerGrid;
+                while(curSize > 1) {
+                    int newBlockSize = (curSize < max_num_threads) ? curSize : max_num_threads;
+                    int newBlocksPerGrid = (curSize + newBlockSize * 2 - 1) / (newBlockSize * 2);
+
+                    reduceMaxKernel<<<newBlocksPerGrid, newBlockSize, newBlockSize * sizeof(int)>>>(
+                            d_max_blockResults,  // 輸入放這裡
+                            d_max_blockResults,  // 輸出也放這裡 (in-place)
+                            curSize
+                    );
+                    checkCudaError(cudaPeekAtLastError(),    "reduceMaxKernel launch param");
+                    checkCudaError(cudaDeviceSynchronize(),  "reduceMaxKernel execution");
+
+                    curSize = newBlocksPerGrid;
+                }
+
+
+                cudaMemcpy(&node->d_tree_node_chain_max_instance_len, d_max_blockResults, sizeof(int), cudaMemcpyDeviceToHost);
+
 
                 //將offset從([3,2,2])建立好([0,3,5,7])
                 //輸入的N是建立好的大小(大小＝4)
@@ -3330,15 +3411,10 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
                 checkCudaError(cudaPeekAtLastError(),    "testtt launch param");
                 checkCudaError(cudaDeviceSynchronize(),  "testtt execution");
 
-//                int *h_final = new int [validCount] ;
-//
-//                cudaMemcpy(&h_final, node->d_tree_node_chain_offset, validCount*sizeof(int), cudaMemcpyDeviceToHost);
-//
-//                for(int i=0;i<validCount;i++){
-//                    printf("%d ", h_final[i]);
-//
-//                }
-//                printf("\n");
+                blockSize = getOptimalBlockSize(node->d_tree_node_chain_offset_size);
+                gridSize  = (node->d_tree_node_chain_offset_size + blockSize - 1)/blockSize;
+                
+
 
 
 
