@@ -1431,23 +1431,28 @@ __global__ void testt(int * d_tree_node_chain_instance,int *d_tree_node_chain_ut
                       int * d_tree_node_chain_offset,int d_tree_node_chain_offset_size,
                       int * d_tree_node_chain_sid,int d_tree_node_chain_sid_size
                       ){
+    printf("d_tree_node_chain_instance:");
     for(int i =0;i<d_tree_node_chain_size;i++){
-        printf("d_tree_node_chain_instance:%d ",d_tree_node_chain_instance[i]);
+        printf("%d ",d_tree_node_chain_instance[i]);
     }
     printf("\n");
 
+    printf("d_tree_node_chain_utility:");
     for(int i =0;i<d_tree_node_chain_size;i++){
-        printf("d_tree_node_chain_utility:%d ",d_tree_node_chain_utility[i]);
+        printf("%d ",d_tree_node_chain_utility[i]);
     }
     printf("\n");
 
+    printf("d_tree_node_chain_offset:");
     for(int i =0;i<d_tree_node_chain_offset_size;i++){
-        printf("d_tree_node_chain_offset:%d ",d_tree_node_chain_offset[i]);
+        printf("%d ",d_tree_node_chain_offset[i]);
     }
 
     printf("\n");
+
+    printf("d_tree_node_chain_sid:");
     for(int i =0;i<d_tree_node_chain_sid_size;i++){
-        printf("d_tree_node_chain_sid:%d ",d_tree_node_chain_sid[i]);
+        printf("%d ",d_tree_node_chain_sid[i]);
     }
     printf("\n\n");
 }
@@ -1643,9 +1648,10 @@ __global__ void find_s_extension_project_num(int *d_tid,int * d_db_offsets,
 //    printf("d_flat_indices_table = 12 :%d\n",d_flat_indices_table[d_table_offsets_level2[d_table_offsets_level1[12]+0]+1]);
 //
 //    printf("d_flat_indices_table:%d\n",d_flat_indices_table[d_table_offsets_level2[d_table_offsets_level1[sid]+extension_item_in_table_sid_index]+1]);
+    int i_instance_index;
     for(int i=0;i<extension_item_in_sid_len;i++){
         //找到第一個超過t_first_instance_index的index 且 tid>t_first_instance_index，代表找到了第一個可擴展的投影點
-        int i_instance_index = d_flat_indices_table[d_table_offsets_level2[d_table_offsets_level1[sid]+extension_item_in_table_sid_index]+i];
+        i_instance_index = d_flat_indices_table[d_table_offsets_level2[d_table_offsets_level1[sid]+extension_item_in_table_sid_index]+i];
         //printf("t_first_instance_index:%d i_instance_index:%d\n",t_first_instance_index,i_instance_index);
 
         if(t_first_instance_index<i_instance_index){
@@ -1838,6 +1844,78 @@ void compactInPlace(int *offset, int *sid,int *parent_node_chain_sid,
             parent_node_chain_sid[pos]   = parent_node_chain_sid[idx];
         }
     }
+}
+
+//tt=目前節點 t=父節點
+__global__ void build_tt_node_chain_utility(int extension_item,
+                                            int * tt_tree_node_chain_offset,int * tt_tree_node_chain_sid,int * tt_tree_parent_node_chain_sid,
+                                            int * tt_tree_node_chain_utility,int * tt_tree_node_chain_instance,
+                                            //父節點前綴和跟table上的utility相加就是答案
+                                            int * t_tree_node_chain_offset,int * t_tree_node_chain_instance,
+                                            int * t_tree_node_chain_prefixMax_offset,int * t_tree_node_chain_prefixMax_utility,
+                                            int * d_iu,int * d_db_offsets,
+                                            int * d_flat_indices_table,int * d_table_offsets_level1,int * d_table_offsets_level2,
+                                            int *d_flat_table_seq_len,int *d_table_seq_len_offsets,
+                                            int * d_table_item_len,
+                                            int * d_flat_table_item,int *d_table_item_offsets
+                                            ){
+
+
+    int t_sid_index = tt_tree_parent_node_chain_sid[tt_tree_node_chain_offset[blockIdx.x]];
+
+    //prefixMax要加上t_chain_first_instance才是真的instance位置
+    //例如 某pattern在s1的chain instance = [2,4,8] s1長度=10 也就是說prefixMax大小是10-2=8  prefixMax index = 0~7 => +2過後才是實際instance
+    int t_chain_first_instance = t_tree_node_chain_instance[t_tree_node_chain_offset[t_sid_index]];
+
+
+    int real_sid = tt_tree_node_chain_sid[blockIdx.x];
+
+    int sid_item_num = d_table_item_len[real_sid];//table中在這個sid有多少種item
+
+    //找要擴展的item有沒有在table中，沒的話offset就回傳0，有的話會回傳table的item的index(不是真的item)
+    int extension_item_in_table_sid_index = binary_search_in_thread(&d_flat_table_item[d_table_item_offsets[real_sid]],sid_item_num,extension_item);
+
+//    if(extension_item_in_table_sid_index==-1){
+//        return;
+//    }
+
+    //要擴展的item在table中此sid中的長度
+    int extension_item_in_sid_len = d_flat_table_seq_len[d_table_seq_len_offsets[real_sid]+extension_item_in_table_sid_index];
+
+    //tt在某sid(blockIdx.x)中的instance長度
+    int tt_instance_len = tt_tree_node_chain_offset[blockIdx.x+1]-tt_tree_node_chain_offset[blockIdx.x];
+
+    if(blockIdx.x==6 && threadIdx.x ==0){
+        printf("extension_item:%d\n",extension_item);
+
+        printf("t_sid_index:%d\n",t_sid_index);
+        printf("real_sid:%d\n",real_sid);
+
+        printf("sid_item_num:%d\n",sid_item_num);
+
+        printf("t_tree_node_chain_offset:%d\n",t_tree_node_chain_offset[t_sid_index]);
+        printf("t_chain_first_instance:%d\n",t_chain_first_instance);
+
+        printf("extension_item_in_sid_len:%d\n",extension_item_in_sid_len);
+        printf("tt_instance_len:%d\n",tt_instance_len);
+    }
+
+    int table_instance_index;
+    int table_instance;
+    int prefixMax_utility;
+    for(int i=threadIdx.x;i< tt_instance_len;i++){
+        //假如s1中的a有5個投影點 然而這個node 的s擴展可以擴展3個投影點 那對於table來看index = [5-3+0=2 , 5-3+1=3 ,5-3+2=4]
+        table_instance_index=extension_item_in_sid_len-tt_instance_len+i;
+        //投影點
+        table_instance = d_flat_indices_table[d_table_offsets_level2[d_table_offsets_level1[real_sid]+extension_item_in_table_sid_index]+table_instance_index];
+        tt_tree_node_chain_instance[tt_tree_node_chain_offset[blockIdx.x]+i] = table_instance;
+
+        //table_instance-t_chain_first_instance就是prefixMax_utility上面的utility
+        prefixMax_utility = t_tree_node_chain_prefixMax_utility[t_tree_node_chain_prefixMax_offset[t_sid_index]+table_instance-t_chain_first_instance];
+        tt_tree_node_chain_utility[tt_tree_node_chain_offset[blockIdx.x]+i] = prefixMax_utility + d_iu[d_db_offsets[real_sid]+table_instance];
+
+    }
+
 }
 
 
@@ -3401,22 +3479,54 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
                 checkCudaError(cudaPeekAtLastError(),    "prefixSumExclusiveLargeNoMalloc launch param");
                 checkCudaError(cudaDeviceSynchronize(),  "prefixSumExclusiveLargeNoMalloc execution");
 
+
+
+
+
+
+                ///建構t'的chain_instance & chain_utility
+                cudaMemcpy(&node->d_tree_node_chain_size, node->d_tree_node_chain_offset+node->d_tree_node_chain_offset_size-1, sizeof(int), cudaMemcpyDeviceToHost);
+
+                node->d_tree_node_chain_instance = d_tree_node_chain_instance_global_memory + d_tree_node_chain_global_memory_index;
+                node->d_tree_node_chain_utility = d_tree_node_chain_utility_global_memory + d_tree_node_chain_global_memory_index;
+
+                d_tree_node_chain_global_memory_index += node->d_tree_node_chain_size;
+
+
+
+                blockSize = getOptimalBlockSize(node->d_tree_node_chain_max_instance_len);
+                gridSize  = node->d_tree_node_chain_sid_size;
+
+                build_tt_node_chain_utility<<<gridSize,blockSize>>>(extension_item,
+                                                                    node->d_tree_node_chain_offset,node->d_tree_node_chain_sid,node->d_tree_parent_node_chain_sid,
+                                                                    node->d_tree_node_chain_utility,node->d_tree_node_chain_instance,
+                                                                    //父節點前綴和跟table上的utility相加就是答案
+                                                                    t_node->d_tree_node_chain_offset,t_node->d_tree_node_chain_instance,
+                                                                    t_node->d_tree_node_chain_prefixMax_offset,t_node->d_tree_node_chain_prefixMax_utility,
+                                                                    d_iu,d_db_offsets,
+                                                                    d_flat_indices_table,d_table_offsets_level1,d_table_offsets_level2,
+                                                                    d_flat_table_seq_len,d_table_seq_len_offsets,
+                                                                    d_table_item_len,
+                                                                    d_flat_table_item,d_table_item_offsets
+                                                                    );
+                checkCudaError(cudaPeekAtLastError(),    "build_tt_node_chain_utility launch param");
+                checkCudaError(cudaDeviceSynchronize(),  "build_tt_node_chain_utility execution");
+
+
                 cout<<"t\'_tree_node_chain_offset:\n";
                 testtt<<<1,1>>>(node->d_tree_node_chain_offset,node->d_tree_node_chain_offset_size);
                 checkCudaError(cudaPeekAtLastError(),    "testtt launch param");
                 checkCudaError(cudaDeviceSynchronize(),  "testtt execution");
 
-                cout<<"t_tree_node_chain_utility:\n";
-                testtt<<<1,1>>>(t_node->d_tree_node_chain_utility,t_node->d_tree_node_chain_size);
+                cout<<"t\'_tree_node_chain_instance:\n";
+                testtt<<<1,1>>>(node->d_tree_node_chain_instance,node->d_tree_node_chain_size);
                 checkCudaError(cudaPeekAtLastError(),    "testtt launch param");
                 checkCudaError(cudaDeviceSynchronize(),  "testtt execution");
 
-                blockSize = getOptimalBlockSize(node->d_tree_node_chain_offset_size);
-                gridSize  = (node->d_tree_node_chain_offset_size + blockSize - 1)/blockSize;
-                
-
-
-
+                cout<<"t\'_tree_node_chain_utility:\n";
+                testtt<<<1,1>>>(node->d_tree_node_chain_utility,node->d_tree_node_chain_size);
+                checkCudaError(cudaPeekAtLastError(),    "testtt launch param");
+                checkCudaError(cudaDeviceSynchronize(),  "testtt execution");
 
 
 
