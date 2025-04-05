@@ -3696,7 +3696,7 @@ void GPUHUSP(const GPU_DB &Gpu_Db,const DB &DB_test,int const minUtility,int &HU
 
             if(single_item==1275){
                 cout<<"d_tree_node_chain_prefixMax_offset:\n";
-                testtt<<<1,1>>>(node->d_tree_node_chain_prefixMax_offset,node->d_tree_node_chain_prefixMax_offset_size);
+                testtt<<<1,1>>>(node->d_tree_node_chain_prefixMax_offset,node->d_tree_node_chain_prefixMax_offset_size-1);
                 checkCudaError(cudaPeekAtLastError(),    "testtt launch param");
                 checkCudaError(cudaDeviceSynchronize(),  "testtt execution");
             }
